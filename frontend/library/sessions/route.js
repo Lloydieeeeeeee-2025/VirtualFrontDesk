@@ -1,5 +1,5 @@
 import crypto from "crypto"
-import { tlcchatmatedb } from "../tlcchatmatedb/route"
+import { chatmate } from "../tlcchatmatedb/route"
 import { REMEMBER_TTL_SECONDS } from "../sessionconstant"
 
 console.log("Session: ", REMEMBER_TTL_SECONDS)
@@ -27,7 +27,7 @@ export async function createSession({useraccountid, remember}) {
         const expiresat = new Date(Date.now() + REMEMBER_TTL_SECONDS * 1000)
         console.log("expires_at: ", expiresat)
 
-        await tlcchatmatedb.query("INSERT INTO sessions (useraccountid, sessiontoken, expires_at, remember) VALUES (?,?,?,?)", [useraccountid, tokenHash, expiresat, 1])
+        await chatmate.query("INSERT INTO sessions (useraccountid, sessiontoken, expires_at, remember) VALUES (?,?,?,?)", [useraccountid, tokenHash, expiresat, 1])
     }
 
     return {token}
@@ -36,7 +36,7 @@ export async function createSession({useraccountid, remember}) {
 export async function validateSession(rawToken) {
     if (!rawToken) return {valid: false}
     const tokenHash = sha256hex(rawToken)
-    const [rows] = await tlcchatmatedb.query("SELECT s.sessionid, s.useraccountid, s.expires_at, u.userrole FROM sessions s JOIN useraccounts u ON u.useraccountid = s.useraccountid WHERE s.sessiontoken = ? LIMIT 1", [tokenHash])
+    const [rows] = await chatmate.query("SELECT s.sessionid, s.useraccountid, s.expires_at, u.userrole FROM sessions s JOIN useraccounts u ON u.useraccountid = s.useraccountid WHERE s.sessiontoken = ? LIMIT 1", [tokenHash])
 
     const row = rows[0]
     console.log("renewSession.row: ", row)
@@ -47,7 +47,7 @@ export async function validateSession(rawToken) {
     const expired = new Date(row.expires_at) <= new Date
     if (expired) {
         console.log("User role: ", row.userrole)
-        await tlcchatmatedb.query("DELETE FROM sessions WHERE sessionid = ?", [row.sessionid])
+        await chatmate.query("DELETE FROM sessions WHERE sessionid = ?", [row.sessionid])
         return {valid: false}
     }
 
@@ -57,5 +57,5 @@ export async function validateSession(rawToken) {
 export async function destroySession(rawToken) {
     if (!rawToken) return;
     const tokenHash = sha256hex(rawToken)
-    await tlcchatmatedb.query("DELETE FROM sessions WHERE sessiontoken = ? ", [tokenHash])
+    await chatmate.query("DELETE FROM sessions WHERE sessiontoken = ? ", [tokenHash])
 }
