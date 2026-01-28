@@ -1,12 +1,12 @@
 "use client"
 import Navigation from "../navigation"
-import { useState, useEffect } from "react"
+import { useState, useEffect, Suspense } from "react"
 import { useSearchParams } from "next/navigation"
 import Remove from "../remove"
 import Update from "./update"
 import Create from "./create"
 
-export default function Users() {
+function UsersContent() {
     const [accountsSettingsModal, setAccountsSettingsModal] = useState(false)
     const [addModal, setAddModal] = useState(false)
     const [editAccountModal, setEditAccountModal] = useState(false)
@@ -212,5 +212,13 @@ export default function Users() {
             <Create open={addModal} close={() => setAddModal(false)} />
             <Update open={editAccountModal} close={() => setEditAccountModal(false)} selectedAccountRow={selectedAccountRow} />
         </main>
+    )
+}
+
+export default function Users() {
+    return (
+        <Suspense fallback={<div className="flex items-center justify-center min-h-screen"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#205781]"></div></div>}>
+            <UsersContent />
+        </Suspense>
     )
 }
