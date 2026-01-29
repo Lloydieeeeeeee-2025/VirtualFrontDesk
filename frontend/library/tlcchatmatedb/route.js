@@ -4,7 +4,7 @@ import mysql from "mysql2/promise"
 export const chatmate = mysql.createPool({
     host: "148.222.53.74",
     user: "u690915301_administrator",
-    password: "tlcchatmate#898989mm$//M",
+    password: "TestDB123!",
     database: "u690915301_tlcchatmate",
     port: 3306,
     waitForConnections: true,
