@@ -26,7 +26,10 @@ export async function POST(request) {
         }
 
         const authenticatedUser = userRows[0];
-        const isPasswordValid = await bcrypt.compare(user_password, authenticatedUser.user_password);
+        const isPasswordValid = await bcrypt.compare(
+            user_password,
+            authenticatedUser.user_password
+        );
 
         if (!isPasswordValid) {
             return NextResponse.json(
@@ -48,9 +51,13 @@ export async function POST(request) {
             { status: 200 }
         );
     } catch (error) {
-        console.error("Login error:", error);
+        console.error("Login error - Full details:", error.message, error.code);
         return NextResponse.json(
-            { success: false, message: "Server error during login." },
+            {
+                success: false,
+                message: "Server error during login.",
+                debug: error.message // Remove this in production!
+            },
             { status: 500 }
         );
     }
