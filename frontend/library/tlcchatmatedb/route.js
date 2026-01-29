@@ -2,7 +2,7 @@ import mysql from "mysql2/promise"
 
 // october 20
 export const chatmate = mysql.createPool({
-    host: "148.222.53.74",
+    host: "srv2092.hstgr.io",
     user: "u690915301_administrator",
     password: "TestDB123!",
     database: "u690915301_tlcchatmate",
