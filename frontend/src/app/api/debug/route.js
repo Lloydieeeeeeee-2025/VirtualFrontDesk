@@ -1,6 +1,6 @@
 // api/debug/route.js
 import { NextResponse } from "next/server";
-import { chatmate } from "../../../../../library/tlcchatmatedb/route";
+import { chatmate } from "../../../../library/tlcchatmatedb/route";
 
 export async function GET() {
     try {
