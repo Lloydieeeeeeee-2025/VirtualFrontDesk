@@ -3,9 +3,9 @@ import mysql.connector
 
 def tlcchatmate():
     return mysql.connector.connect(
-        host=os.getenv("DB_HOST", "db"),
+        host=os.getenv("DB_HOST", "host.docker.internal"),
         user=os.getenv("DB_USER", "root"),
-        password=os.getenv("DB_PASSWORD", "password"), 
+        password=os.getenv("DB_PASSWORD", "kmlV3@VVVE$$56nnmh"),
         database=os.getenv("DB_NAME", "tlcchatmate"),
         port=int(os.getenv("DB_PORT", "3306")),
     )
