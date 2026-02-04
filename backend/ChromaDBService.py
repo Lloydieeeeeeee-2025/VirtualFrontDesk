@@ -18,13 +18,19 @@ class ChromaDBService:
         self._initialize_client()
         
     def _initialize_client(self) -> None:
-        self.client = chromadb.PersistentClient(path=self.chroma_path)      
+        """Initialize ChromaDB persistent client."""
+        self.client = chromadb.PersistentClient(path=self.chroma_path)
     
+    def reinitialize_client(self) -> None:
+        """Force reinitialize the ChromaDB client for clean state."""
+        self._initialize_client()
+        print("🔄 ChromaDB client reinitialized")
+        
     def get_collection(self, force_refresh=False):
         """Get collection with optional force refresh to see latest data."""
         if force_refresh:
             # Reinitialize client to force reading from disk
-            self._initialize_client()
+            self.reinitialize_client()
         
         return self.client.get_or_create_collection(name=self.collection_name)
         

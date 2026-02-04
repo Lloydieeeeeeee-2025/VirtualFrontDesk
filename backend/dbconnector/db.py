@@ -16,8 +16,8 @@ def tlcchatmate():
         user="root",
         password="",
         database="tlcchatmate"
-    )"""
-
+    )
+"""
 """
 def dbconnection():
     return mysql.connector.connect(

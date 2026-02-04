@@ -32,7 +32,28 @@ class KnowledgeRepository(ChromaDBService):
         self.web_scraper = WebScraper()
         self.version_detector = VersionDetector()
 
+    def _cleanup_all_collections(self):
+        """Delete ALL orphaned collections and keep only the current one."""
+        try:
+            all_collections = self.client.list_collections()
+            print(f"\n🔍 Found {len(all_collections)} total collections in ChromaDB")
+            
+            for collection in all_collections:
+                col_name = collection.name
+                if col_name != self.collection_name:
+                    print(f"🗑️ Removing orphaned collection: {col_name}")
+                    try:
+                        self.client.delete_collection(name=col_name)
+                        print(f"   ✓ Deleted: {col_name}")
+                    except Exception as e:
+                        print(f"   ✗ Failed to delete {col_name}: {e}")
+            
+            print(f"✓ Cleanup complete - only '{self.collection_name}' will remain")
+        except Exception as e:
+            print(f"✗ Error during cleanup: {e}")
+
     def get_db_connection(self):
+        """Get database connection."""
         try:
             return tlcchatmate()
         except Exception as e:
@@ -81,6 +102,115 @@ class KnowledgeRepository(ChromaDBService):
             metadatas=[{"last_sync": current_time}],
             ids=["_sync_metadata"]
         )
+
+    def _extract_program_identifier(self, content: str, document_name: str) -> str:
+        """
+        Extract program identifier from document content and name.
+        Returns program key like 'bsit', 'bsba_om', 'bsed_math', etc.
+        """
+        name_lower = document_name.lower() if document_name else ""
+        content_sample = content[:2000].lower() if content else ""
+        
+        # Map of program identifiers with multiple pattern variations
+        program_patterns = {
+            'bsit': [
+                'bachelor of science in information technology',
+                'information technology',
+                'bsit',
+                'bs in information technology'
+            ],
+            'bsba_om': [
+                'operations management',
+                'bsba om',
+                'bsba-om',
+                'bs in business administration (operations management)',
+                'bachelor of science in business administration (operations management)'
+            ],
+            'bsba_fm': [
+                'financial management',
+                'bsba fm',
+                'bsba-fm',
+                'bs in business administration (financial management)',
+                'bachelor of science in business administration (financial management)'
+            ],
+            'bsba_mm': [
+                'marketing management',
+                'bsba mm',
+                'bsba-mm',
+                'bs in business administration (marketing management)',
+                'bachelor of science in business administration (marketing management)'
+            ],
+            'bsentrep': [
+                'entrepreneurship',
+                'bsentrep',
+                'bs entrep',
+                'bs in entrepreneurship',
+                'bachelor of science in entrepreneurship'
+            ],
+            'bsed_math': [
+                'bachelor of secondary education (math)',
+                'secondary education (math)',
+                'bsed-math',
+                'bsed math',
+                'secondary education math',
+                'mathematics education',
+                'education math'
+            ],
+            'bsed_english': [
+                'bachelor of secondary education (english)',
+                'secondary education (english)',
+                'bsed-eng',
+                'bsed english',
+                'secondary education english',
+                'english education',
+                'education english'
+            ],
+            'beed': [
+                'bachelor of elementary education',
+                'elementary education',
+                'beed',
+                'bs in elementary education'
+            ],
+            'act_network': [
+                'act - networking',
+                'networking track',
+                'act network',
+                'act-network',
+                'data communications and networking'
+            ],
+            'act_data': [
+                'act - data engineering',
+                'data engineering track',
+                'act data',
+                'act-data',
+                'data management'
+            ],
+            'act_appdev': [
+                'act - applications development',
+                'applications development track',
+                'act app',
+                'act application',
+                'applications development'
+            ],
+            'tcp': [
+                'teacher certificate program',
+                'tcp'
+            ],
+        }
+        
+        # Priority 1: Check document name first (highest priority)
+        for program_key, patterns in program_patterns.items():
+            for pattern in patterns:
+                if pattern in name_lower:
+                    return program_key
+        
+        # Priority 2: Check content
+        for program_key, patterns in program_patterns.items():
+            for pattern in patterns:
+                if pattern in content_sample:
+                    return program_key
+        
+        return 'unknown'
 
     def _process_handbook_data(self, conn, documents_data: List[dict]):
         """Process handbook PDF data and collect for version detection."""
@@ -150,15 +280,20 @@ class KnowledgeRepository(ChromaDBService):
 
     def _chunk_and_store_documents(self, documents_data: List[dict], archive_status: dict, 
                                    documents: List[str], metadata: List[dict], ids: List[str]):
-        """Chunk documents and add archive metadata - CRITICAL: Ensure is_archived is always set."""
+        """Chunk documents and add archive metadata with program identifier."""
         for doc_data in documents_data:
             doc_id = doc_data['id']
             content = doc_data['content']
             is_archived = archive_status.get(doc_id, False)
             
-            # CRITICAL: Extract revision year for metadata
+            # Extract revision year for metadata
             revision_info = self.version_detector.extract_all_revision_info(content)
             revision_year = revision_info.get('year', None)
+            
+            # Extract program identifier for courses
+            program_id = None
+            if doc_data['type'] == 'course':
+                program_id = self._extract_program_identifier(content, doc_data['name'])
             
             chunks = self.text_splitter.split_text(content)
             for idx, chunk in enumerate(chunks):
@@ -166,12 +301,12 @@ class KnowledgeRepository(ChromaDBService):
                 chunk_id = f"{doc_id}_chunk_{idx}"
                 ids.append(chunk_id)
                 
-                # CRITICAL: Always set is_archived as boolean, never None
+                # Build metadata with program identifier
                 meta = {
                     "data_type": doc_data['type'],
                     "updated_at": doc_data['updated_at'],
                     "chunk_index": idx,
-                    "is_archived": bool(is_archived),  # Ensure boolean
+                    "is_archived": bool(is_archived),
                     "document_version": "archived" if is_archived else "current"
                 }
                 
@@ -179,18 +314,20 @@ class KnowledgeRepository(ChromaDBService):
                 if revision_year:
                     meta["revision_year"] = revision_year
                 
+                # Add program-specific metadata
                 if doc_data['type'] == 'handbook':
                     meta["handbook_id"] = doc_id.replace("handbook_", "")
                     meta["handbook_name"] = doc_data['name']
                 elif doc_data['type'] == 'course':
                     meta["course_id"] = doc_id.replace("course_", "")
                     meta["document_name"] = doc_data['name']
+                    meta["program_id"] = program_id  # CRITICAL: Program identifier
                 
                 metadata.append(meta)
         
         archived_count = sum(1 for status in archive_status.values() if status)
         current_count = len(archive_status) - archived_count
-        print(f"📦 Archived: {archived_count} documents, Current: {current_count} documents")
+        print(f"📦 Archived: {archived_count} | ✓ Current: {current_count}")
 
     def collect_all_documents(self, conn) -> Tuple[List[str], List[dict], List[str]]:
         """Collect all documents from database and websites with version detection."""
@@ -220,7 +357,7 @@ class KnowledgeRepository(ChromaDBService):
         return documents, metadata, ids
 
     def sync_data_to_chromadb(self) -> bool:
-        """Main function to sync database data to ChromaDB - FULL RECREATION."""
+        """Main function to sync database data to ChromaDB - FULL RECREATION WITH CLEANUP."""
         db = self.get_db_connection()
         if not db:
             return False
@@ -228,7 +365,12 @@ class KnowledgeRepository(ChromaDBService):
         try:
             conn = db.cursor()
             print("✓ Database connection established")
-            print("🔥 Collecting all current documents from database...")
+            
+            # CRITICAL: Clean up orphaned collections first
+            print("\n🧹 Performing collection cleanup...")
+            self._cleanup_all_collections()
+            
+            print("\n🔥 Collecting all current documents from database...")
             documents, metadata, ids = self.collect_all_documents(conn)
 
             if not documents:
@@ -311,9 +453,11 @@ class KnowledgeRepository(ChromaDBService):
             if all_data['metadatas']:
                 print("\n📋 Sample metadata (first 3):")
                 for i, meta in enumerate(all_data['metadatas'][:3]):
+                    program_id = meta.get('program_id', 'N/A')
                     print(f"  [{i+1}] is_archived={meta.get('is_archived')}, "
                           f"version={meta.get('document_version')}, "
-                          f"year={meta.get('revision_year', 'N/A')}")
+                          f"year={meta.get('revision_year', 'N/A')}, "
+                          f"program={program_id}")
 
             unique_docs = set()
             for doc_id in all_data['ids']:

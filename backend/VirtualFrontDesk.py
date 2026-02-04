@@ -21,7 +21,7 @@ class LoginResponse(BaseModel):
 class PromptRequest(BaseModel):
     prompt: str
     conversationSession: str 
-    username: Optional[str] = None # october 18
+    username: Optional[str] = None
     
 class PromptResponse(BaseModel):
     success: bool
@@ -34,9 +34,8 @@ class VirtualFrontDesk(AuthDetector):
     def __init__(self,):
         super().__init__()
         self.conversation_history: Dict[str, List[dict]] = {}
-        self.user_sessions: Dict[str, requests.Session] = {} # October 18
+        self.user_sessions: Dict[str, requests.Session] = {}
       
-    # october 18 - sa pag scrape sa portal
     def store_student_session(self, username: str, session: requests.Session) -> None:
         self.user_sessions[username] = session
         print(f"Stored session for user: {username}")
@@ -46,9 +45,7 @@ class VirtualFrontDesk(AuthDetector):
     
     def is_user_authenticated(self, username: str) -> bool:
         return username in self.user_sessions
-    # end 
     
-    # gamit sa session memory para sa conversation ellipsis or clarification   
     def get_session_history(self, session_id: str) -> List[dict]:
         return self.conversation_history.get(session_id, [])
     
@@ -57,7 +54,6 @@ class VirtualFrontDesk(AuthDetector):
         
     def get_all_sessions(self) -> List[str]:
         return list(self.conversation_history.keys())
-    # end of conversation ellipsis
     
     def build_conversational_query(self, history: List[dict], current_prompt: str) -> str:
         query_parts = [current_prompt]
@@ -85,6 +81,82 @@ class VirtualFrontDesk(AuthDetector):
             return f"{last_student_prompt} {prompt}"
         
         return prompt
+    
+    def _extract_program_from_query(self, prompt: str) -> Optional[str]:
+        """
+        Extract program identifier from user query.
+        Returns program_id like 'bsit', 'bsba_om', 'bsed_math', etc., or None.
+        More flexible matching for natural language queries.
+        """
+        prompt_lower = prompt.lower()
+        
+        # Map of programs and their detection keywords
+        # Order matters - more specific patterns first to avoid conflicts
+        program_keywords = {
+            'bsba_om': ['operations management', 'bsba om', 'bsba-om', 'om student', 'om program'],
+            'bsba_fm': ['financial management', 'bsba fm', 'bsba-fm', 'fm student', 'fm program'],
+            'bsba_mm': ['marketing management', 'bsba mm', 'bsba-mm', 'mm student', 'mm program'],
+            'bsentrep': ['entrepreneurship', 'bsentrep', 'bs entrep', 'entrep student', 'entrep program'],
+            'bsit': ['bsit', 'information technology', 'it student', 'it program', 'bs in it'],
+            'bsed_math': [
+                'bsed math',
+                'bsed-math',
+                'secondary education math',
+                'mathematics teacher',
+                'math education',
+                'education mathematics',
+                'math secondary'
+            ],
+            'bsed_english': [
+                'bsed english',
+                'bsed-eng',
+                'secondary education english',
+                'english teacher',
+                'english education',
+                'education english',
+                'english secondary'
+            ],
+            'beed': [
+                'beed',
+                'elementary education',
+                'elementary teacher',
+                'primary education',
+                'grade school teacher'
+            ],
+            'act_network': [
+                'networking',
+                'act network',
+                'act-network',
+                'network track',
+                'data communications and networking'
+            ],
+            'act_data': [
+                'data engineering',
+                'act data',
+                'act-data',
+                'data track',
+                'data management'
+            ],
+            'act_appdev': [
+                'applications development',
+                'act app',
+                'act application',
+                'appdev track',
+                'application development'
+            ],
+            'tcp': ['teacher certificate', 'tcp', 'teacher certificate program'],
+        }
+        
+        # Check for exact program mentions first
+        for program_id, keywords in program_keywords.items():
+            for keyword in keywords:
+                if keyword in prompt_lower:
+                    print(f"📌 Detected program context: {program_id} (keyword: '{keyword}')")
+                    return program_id
+        
+        # If no program explicitly mentioned, return None
+        # This allows general queries to work without program filtering
+        return None
     
     def process_prompt(self, request: PromptRequest) -> PromptResponse:
         print(f"Processing prompt: '{request.prompt}'")
@@ -124,7 +196,7 @@ class VirtualFrontDesk(AuthDetector):
                 system_prompt = self._create_system_prompt(private_data, history)
                 messages = self._prepare_messages(system_prompt, history, prompt)
                 response = self.openai_client.chat.completions.create(
-                    model="gpt-5-mini",
+                    model="gpt-4o",
                     messages=messages
                 )
                 ai_response = response.choices[0].message.content
@@ -161,16 +233,49 @@ class VirtualFrontDesk(AuthDetector):
         # STRICT DEFAULT: Only current documents unless explicitly requested
         where_filter = {"is_archived": False}
         search_mode = "CURRENT ONLY"
+        archive_filter_value = False
         
         if archive_settings['include_archived']:
             if archive_settings['archived_only']:
                 where_filter = {"is_archived": True}
                 search_mode = "ARCHIVED ONLY"
+                archive_filter_value = True
             else:
                 where_filter = None  # Include both
                 search_mode = "CURRENT + ARCHIVED"
+                archive_filter_value = None
+        
+        # CRITICAL: Extract program context from query for course documents
+        program_id = self._extract_program_from_query(prompt)
+        
+        # Build dynamic where_filter to include program filtering
+        if program_id:
+            # When program is detected
+            if archive_filter_value is None:
+                # Include both archived and current for this program
+                where_filter = {"program_id": program_id}
+                search_mode += f" | PROGRAM: {program_id}"
+            else:
+                # Combine filters: is_archived AND program_id
+                where_filter = {
+                    "$and": [
+                        {"is_archived": archive_filter_value},
+                        {"program_id": program_id}
+                    ]
+                }
+                search_mode += f" | PROGRAM: {program_id}"
+        else:
+            # No program detected - use archive filter only
+            # This allows general questions to work
+            if where_filter is None:
+                where_filter = None  # No filter, get all
+            # else: where_filter is already {"is_archived": False}
         
         print(f"🔍 Search Mode: {search_mode}")
+        if where_filter:
+            print(f"📋 Filter: {where_filter}")
+        else:
+            print(f"📋 Filter: None (all documents)")
         
         # Query with strict filtering
         query_params = {
@@ -187,242 +292,136 @@ class VirtualFrontDesk(AuthDetector):
             print(f"📊 Retrieved {len(results['metadatas'][0])} results")
             archived_count = sum(1 for m in results['metadatas'][0] if m.get('is_archived', False))
             current_count = len(results['metadatas'][0]) - archived_count
-            print(f"   Current: {current_count}, Archived: {archived_count}")
+            print(f"   Archived: {archived_count} | Current: {current_count}")
+            
+            if program_id:
+                program_matches = sum(1 for m in results['metadatas'][0] if m.get('program_id') == program_id)
+                print(f"   Program '{program_id}' matches: {program_matches}")
+            
+            # Show sample of what was retrieved
+            if results['metadatas'][0]:
+                print(f"   Sample metadata from result:")
+                sample_meta = results['metadatas'][0][0] if results['metadatas'][0] else {}
+                print(f"     - program_id: {sample_meta.get('program_id', 'N/A')}")
+                print(f"     - data_type: {sample_meta.get('data_type', 'N/A')}")
+                print(f"     - is_archived: {sample_meta.get('is_archived', 'N/A')}")
         
-        context_parts = []
-        relevant_count = 0
-        SIMILARITY_THRESHOLD = 0.3
+        context = self._extract_context_from_results(results)
         
-        if results['documents'] and results['distances']:
-            for doc, meta, distance in zip(
-                results['documents'][0], 
-                results['metadatas'][0], 
-                results['distances'][0]
-            ):
-                similarity = 1 / (1 + distance)
-                
-                if similarity >= SIMILARITY_THRESHOLD and doc and len(doc.strip()) > 10:
-                    relevant_count += 1
-                    
-                    # Tag archived content clearly
-                    if meta.get('is_archived', False):
-                        version_tag = f"[ARCHIVED {meta.get('revision_year', 'VERSION')}]"
-                        context_parts.append(f"{version_tag} {doc}")
-                    else:
-                        context_parts.append(doc)
-        
-        if not context_parts:
-            context = "NO_RELEVANT_DATA"
-            print(f"⚠ No relevant results found for query: '{prompt}'")
-        else:
-            context = "\n\n".join(context_parts)
-            print(f"✓ Found {relevant_count} relevant documents")
+        if not context.strip():
+            ai_response = "I'm sorry, but I don't have information about that topic in our current records. Please try asking about general school information, programs, or fees."
+            print(f"No relevant context found for query")
+            self._update_conversation_history(conversation_session, history, prompt, ai_response)
+            
+            return PromptResponse(
+                success=True,
+                response=ai_response,
+                requires_auth=False,
+                intent=intent
+            )
         
         system_prompt = self._create_system_prompt(context, history)
         messages = self._prepare_messages(system_prompt, history, prompt)
+        
         response = self.openai_client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=messages
+            model="gpt-4o",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=500
         )
+        
         ai_response = response.choices[0].message.content
-        print(f"AI Response: {ai_response}")
+        print(f"AI Response: {ai_response[:100]}...")
         
         self._update_conversation_history(conversation_session, history, prompt, ai_response)
+        
         return PromptResponse(
-            success=True, 
-            response=ai_response, 
-            requires_auth=False, 
+            success=True,
+            response=ai_response,
+            requires_auth=False,
             intent=intent
         )
+    
+    def _extract_context_from_results(self, results) -> str:
+        """Extract text context from ChromaDB query results."""
+        context_parts = []
         
-    def _create_system_prompt(self, context: str, history: List[dict]) -> str:
-        if context == "NO_RELEVANT_DATA":
-            return """You are a professional, conversational, and student-friendly assistant.
+        if results['documents'] and len(results['documents']) > 0:
+            # results['documents'] is a list of lists (one list per query)
+            docs_list = results['documents'][0] if isinstance(results['documents'][0], list) else results['documents']
+            for doc in docs_list[:10]:
+                if isinstance(doc, str) and doc and doc.strip():
+                    context_parts.append(doc)
+        
+        return "\n".join(context_parts)
+    
+    def _create_system_prompt(self, context: str, history: List[dict] = None) -> str:
+        if history is None:
+            history = []
+        
+        return f"""You are TLC Chatmate, a helpful AI assistant for The Lewis College.
 
-            CRITICAL INSTRUCTION:
-            • If you don't have enough information to answer, politely say you don't have the details at the moment.
-            • Encourage the student to provide more details or to contact the office for accurate information.
-            • If the question is unclear, kindly ask for clarification before answering.
-            • Always sound natural and human — never mention any system, database, or stored records.
-            • Avoid robotic or repetitive tone.
+        INSTRUCTIONS:
+        - Answer based ONLY on the provided information.
+        - Be accurate and concise.
+        - If information is not available, say so directly.
+        - Do NOT make up or assume information.
+        - Keep responses friendly and professional.
 
-            Example (do not copy exactly):
-            → "I'm sorry, I don't have specific details about that right now. Could you please share a bit more about what you need, or you may reach out to the office for assistance."
+        RESPONSE GUIDELINES:
+        - Provide direct, accurate answers.
+        - Use 2-3 sentences maximum for simple questions.
+        - For complex topics, organize information clearly.
+        - If clarification is needed, ask ONE specific question.
 
-            DO NOT:
-            • Mention any technical terms like system, data, or database.
-            • Guess or assume missing information.
-            • Provide unrelated or generic educational info.
-            """
+        CLARIFICATION FORMAT:
+        - State what you can help with briefly (optional, 1 short phrase)
+        - Ask the clarification question directly
+        - Provide specific options or examples if applicable
 
-        return f"""
-            You are a friendly and professional Virtual Front Desk (VFD) for The Lewis College.
+        If the question is clear, do NOT ask follow-up questions.
 
-            Your goal is to assist students in a warm, conversational way while providing ONLY the exact information available in the provided data.
-            You must not use external knowledge, assumptions, or personal interpretation.
+        WHEN TO USE BULLET LISTS (REQUIRED):
+        - Enrollment requirements
+        - Scholarships
+        - School fees
+        - Any checklist-style or multi-item information
 
-            CONVERSATIONAL TONE RULE (VERY IMPORTANT)
-            - Every response must begin with a short, friendly introductory sentence that:
-            - Briefly explains what the information is about, or
-            - Acknowledges the student's question naturally
-            - The introduction must be 1 short sentence only.
-            - The tone should sound like a real front desk staff speaking politely and clearly.
-            - VARY your introductions to keep responses fresh and engaging.
+        WHEN NOT TO USE BULLETS:
+        - Single facts (founder, start of classes, tuition only)
+        - Short informational answers
 
-            Example styles (rotate these):
-            - "Great! Let me share [topic] with you."
-            - "Sure thing! Here's what you need to know about [topic]."
-            - "Absolutely! Here are the details you're looking for."
-            - "Happy to help! This is the information on [topic]."
-            - "Of course! Let me pull up those details for you."
-            - "No problem! Here's what we have regarding [topic]."
+        FAIL-SAFE:
+        If information is not available:
+        - Do NOT use conversational introduction
+        - Do NOT use closing line
+        - Politely state that the information is not available in a single sentence
+        - Do NOT guess or fabricate
 
-            Do NOT sound robotic or overly repetitive.
-            Do NOT use the same introduction pattern consecutively.
-            Do NOT start immediately with raw data.
+        CORRECT FORMAT WHEN INFO NOT AVAILABLE:
+        - "I'm sorry, but [specific information] is not available in our current records."
 
-            RELEVANCE & ACCURACY
-            - Provide ONLY the information that directly answers the student's question.
-            - Do NOT include related but unasked details.
-            - Do NOT repeat or duplicate any item.
-            - Use the exact wording and values from the data.
-            - Do NOT interpret, paraphrase in a misleading way, or add explanations not found in the data.
-            - Present information in natural, conversational sentences rather than using unnecessary labels.
-            - Avoid redundant labels like "Name:", "Position:", "Date:", etc. unless they add clarity to complex information.
-            - Use common sense: if asking "who is the dean", respond naturally with "The Dean is [name]" instead of "Name: [name], Position: Dean"
+        RESPONSE STRUCTURE:
+        1. Short conversational introduction (1 sentence)
+        2. Correctly formatted information (paragraph or list)
+        3. Optional polite closing line (1 sentence only)
 
-            CORRECT NATURAL FORMATTING EXAMPLES:
-            "The Dean of the College of Computer Studies is GIL M. JAMISOLA JR., MIS."
-            "Classes start on June 5, 2025."
-            "The tuition fee is Php 475.00 per unit."
-            
-            INCORRECT FORMATTING:
-            "Name: GIL M. JAMISOLA JR., MIS Position: Dean, College of Computer Studies"
-            "Date: June 5, 2025"
-            "Tuition Fee: Php 475.00 per unit" (when it's the only information)
+        LANGUAGE RULES:
+        - Respond only in English, Tagalog, or Bicol
+        - If another language is used, reply in English and state the language limitation
 
-            CLARIFICATION RULE
-            Ask a clarification question ONLY when:
-            - The question is too broad or incomplete (example: "enrollment requirements" without a level).
-            - The question is unclear, unreadable, or ambiguous.
+        TERMINOLOGY:
+        - "Course" refers to subjects
+        - "Program" refers to degree or academic programs
 
-            When asking for clarification:
-            - Do NOT use the conversational introduction (skip "Sure thing!", "Happy to help!", etc.).
-            - Do NOT use a closing line.
-            - Ask only ONE short, direct clarification question.
-            - Keep it polite and simple.
-            - Provide helpful examples or options to guide the student's response.
+        GREETINGS & CLOSING:
+        - If greeted, greet back and ask how you may help
+        - If the student ends politely, respond with a professional closing
+        - Do NOT extend conversation unnecessarily
 
-            CLARIFICATION FORMAT:
-            - State what you can help with briefly (optional, 1 short phrase)
-            - Ask the clarification question directly
-            - Provide specific options or examples if applicable
-
-            CORRECT CLARIFICATION EXAMPLES:
-            - "I'd be happy to help with Senior High School information! Could you clarify what specific details you need — fees, admission requirements, or available tracks?"
-            - "Could you specify which level you're asking about — Preschool, Grade School, Junior High, Senior High, or College?"
-
-            WRONG CLARIFICATION EXAMPLES:
-            - "Sure thing! Here's what you need to know about Senior High School. [then asks clarification]" 
-            - "Happy to help! What do you mean?" 
-
-            If the question is clear, do NOT ask follow-up questions.
-
-            When asking for clarification:
-            - Ask only ONE short clarification question.
-            - Keep it polite and simple.
-            - Do NOT include extra explanations.
-
-            If the question is clear, do NOT ask follow-up questions.
-
-            OPTIONAL CLOSING LINE
-            - You MAY end the response with ONE polite closing line.
-            - VARY your closing lines to keep responses engaging and natural.
-
-            Example closing variations (rotate these):
-            - "Feel free to ask if you have more questions!"
-            - "Anything else you'd like to know?"
-            - "Just let me know if there's anything else I can help you with!"
-            - "Don't hesitate to reach out if you need more info!"
-            - "Happy to help with anything else you need!"
-            - "Let me know if you need further assistance!"
-            - "I'm here if you have other questions!"
-
-            Do NOT use the same closing line consecutively.
-            Do NOT ask specific or probing questions unless clarification is required.
-
-            RESPONSE STRUCTURE
-            1. Short conversational introduction (1 sentence).
-            2. Correctly formatted information (paragraph or list).
-            3. Optional polite closing line (1 sentence only).
-
-            FORMAT RULES
-
-            WHEN TO USE BULLET LISTS (REQUIRED):
-            - Enrollment requirements
-            - Scholarships
-            - School fees
-            - Any checklist-style or multi-item information
-
-            BULLET LIST RULES:
-            - Use bullet symbols (•).
-            - One clear item per bullet.
-            - Each bullet point MUST be on a SEPARATE LINE (press Enter after each bullet).
-            - No repeated labels or duplicated phrases.
-            - Ensure proper line breaks between each item for readability.
-
-            CORRECT FORMAT:
-            - Item 1
-            - Item 2
-            - Item 3
-
-            WRONG FORMAT:
-            - Item 1 • Item 2 • Item 3
-
-            WHEN NOT TO USE BULLETS:
-            - Single facts (example: founder, start of classes, tuition only).
-            - Short informational answers.
-
-            LINE-SEPARATED FORMAT (NO BULLETS):
-            If multiple details are required but bullets are not allowed:
-            - Use labels followed by colons.
-            - Place each item on a new line.
-            - Do NOT use bullet symbols.
-
-            LANGUAGE RULES
-            - Respond only in English, Tagalog, or Bicol.
-            - If another language is used, reply in English and politely state the language limitation.
-            - Do NOT imply understanding of unsupported languages.
-
-            TERMINOLOGY CONTROL
-            - "Course" refers to subjects.
-            - "Program" refers to degree or academic programs.
-            - Do NOT interchange these terms.
-
-            GREETINGS & CLOSING
-            - If greeted, greet back politely and ask how you may help.
-            - If the student ends the conversation politely, respond with a professional closing.
-            - Do NOT extend the conversation unnecessarily.
-
-            FAIL-SAFE
-            If the information is not available in the provided data:
-            - Do NOT use the conversational introduction.
-            - Do NOT use a closing line.
-            - Politely state that the information is not available in a single, direct sentence.
-            - Do NOT guess or fabricate an answer.
-            - Keep the response brief and honest.
-
-            CORRECT FORMAT WHEN INFO IS NOT AVAILABLE:
-            - "I'm sorry, but [specific information] is not available in our current records."
-            - "Unfortunately, we don't have information about [topic] in our system at the moment."
-            - "I apologize, but details about [topic] are not included in the available data."
-
-            WRONG FORMAT:
-            - "Of course! Let me pull up those details for you. Sorry — the provided data does not include..." 
-            - "Happy to help! Unfortunately, I don't have that information. Feel free to ask more questions!" 
-        --------------------
+        ----------
         data:
-        {str(history[-4:]) if len(history) >= 4 else str(history)}
+        {str(history[-4:]) if history and len(history) >= 4 else str(history)}
         {context}
         """
 
