@@ -1,3 +1,4 @@
+
 import time
 import uvicorn
 import requests
@@ -6,56 +7,70 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Dict, List, Optional
 from AuthDetector import AuthDetector
+from SessionManager import SessionManager
 from bs4 import BeautifulSoup
+import pytz
+from datetime import datetime
 
 
 class LoginRequest(BaseModel):
     username: str
     password: str
     
+
 class LoginResponse(BaseModel):
     success: bool
     message: str
     error: Optional[str] = None
     
+
 class PromptRequest(BaseModel):
     prompt: str
-    conversationSession: str 
+    conversationSession: str  
     username: Optional[str] = None
     
+
 class PromptResponse(BaseModel):
     success: bool
     response: str
     requires_auth: bool = False
     intent: Optional[str] = None
     
+
 class VirtualFrontDesk(AuthDetector):
     
-    def __init__(self,):
+    def __init__(self):
         super().__init__()
-        self.conversation_history: Dict[str, List[dict]] = {}
+        self.session_manager = SessionManager(max_history_per_session=4)
         self.user_sessions: Dict[str, requests.Session] = {}
-      
+        
     def store_student_session(self, username: str, session: requests.Session) -> None:
+        """Store authenticated user session."""
         self.user_sessions[username] = session
         print(f"Stored session for user: {username}")
         
     def get_user_session(self, username: str) -> Optional[requests.Session]:
+        """Retrieve authenticated user session."""
         return self.user_sessions.get(username)
     
     def is_user_authenticated(self, username: str) -> bool:
+        """Check if user is authenticated."""
         return username in self.user_sessions
     
     def get_session_history(self, session_id: str) -> List[dict]:
-        return self.conversation_history.get(session_id, [])
+        """Get conversation history for a session."""
+        return self.session_manager.get_session_history(session_id)
     
     def update_session_history(self, session_id: str, history: List[dict]) -> None:
-        self.conversation_history[session_id] = history
+        """Update conversation history for a session."""
+        self.session_manager.update_history(session_id, history)
         
     def get_all_sessions(self) -> List[str]:
-        return list(self.conversation_history.keys())
+        """Get all active session IDs."""
+        return self.session_manager.get_all_sessions()
     
     def build_conversational_query(self, history: List[dict], current_prompt: str) -> str:
+        """Build query with recent conversation context."""
         query_parts = [current_prompt]
         
         if len(history) >= 2:
@@ -68,6 +83,7 @@ class VirtualFrontDesk(AuthDetector):
         return " ".join(query_parts)
     
     def extract_main_topic(self, prompt: str, history: List[dict]) -> str:
+        """Extract main topic, detecting follow-up questions."""
         if len(history) < 2:
             return prompt
         
@@ -75,7 +91,7 @@ class VirtualFrontDesk(AuthDetector):
         if not last_student_messages:
             return prompt
         
-        last_student_prompt = last_student_messages[-1]["content"]   
+        last_student_prompt = last_student_messages[-1]["content"]    
         if self.is_follow_up_question(prompt, last_student_prompt):
             print(f"Detected follow-up question: '{prompt}' is related to '{last_student_prompt}'")
             return f"{last_student_prompt} {prompt}"
@@ -86,12 +102,9 @@ class VirtualFrontDesk(AuthDetector):
         """
         Extract program identifier from user query.
         Returns program_id like 'bsit', 'bsba_om', 'bsed_math', etc., or None.
-        More flexible matching for natural language queries.
         """
         prompt_lower = prompt.lower()
         
-        # Map of programs and their detection keywords
-        # Order matters - more specific patterns first to avoid conflicts
         program_keywords = {
             'bsba_om': ['operations management', 'bsba om', 'bsba-om', 'om student', 'om program'],
             'bsba_fm': ['financial management', 'bsba fm', 'bsba-fm', 'fm student', 'fm program'],
@@ -99,87 +112,129 @@ class VirtualFrontDesk(AuthDetector):
             'bsentrep': ['entrepreneurship', 'bsentrep', 'bs entrep', 'entrep student', 'entrep program'],
             'bsit': ['bsit', 'information technology', 'it student', 'it program', 'bs in it'],
             'bsed_math': [
-                'bsed math',
-                'bsed-math',
-                'secondary education math',
-                'mathematics teacher',
-                'math education',
-                'education mathematics',
-                'math secondary'
+                'bsed math', 'bsed-math', 'secondary education math',
+                'mathematics teacher', 'math education', 'education mathematics', 'math secondary'
             ],
             'bsed_english': [
-                'bsed english',
-                'bsed-eng',
-                'secondary education english',
-                'english teacher',
-                'english education',
-                'education english',
-                'english secondary'
+                'bsed english', 'bsed-eng', 'secondary education english',
+                'english teacher', 'english education', 'education english', 'english secondary'
             ],
             'beed': [
-                'beed',
-                'elementary education',
-                'elementary teacher',
-                'primary education',
-                'grade school teacher'
+                'beed', 'elementary education', 'elementary teacher',
+                'primary education', 'grade school teacher'
             ],
             'act_network': [
-                'networking',
-                'act network',
-                'act-network',
-                'network track',
+                'networking', 'act network', 'act-network', 'network track',
                 'data communications and networking'
             ],
             'act_data': [
-                'data engineering',
-                'act data',
-                'act-data',
-                'data track',
-                'data management'
+                'data engineering', 'act data', 'act-data', 'data track', 'data management'
             ],
             'act_appdev': [
-                'applications development',
-                'act app',
-                'act application',
-                'appdev track',
-                'application development'
+                'applications development', 'act app', 'act application',
+                'appdev track', 'application development'
             ],
             'tcp': ['teacher certificate', 'tcp', 'teacher certificate program'],
         }
         
-        # Check for exact program mentions first
         for program_id, keywords in program_keywords.items():
             for keyword in keywords:
                 if keyword in prompt_lower:
-                    print(f"📌 Detected program context: {program_id} (keyword: '{keyword}')")
+                    print(f"📌 Detected program context: {program_id}")
                     return program_id
         
-        # If no program explicitly mentioned, return None
-        # This allows general queries to work without program filtering
         return None
     
+    def _create_system_prompt_strict(self, context: str, history: List[dict] = None) -> str:
+        """Create STRICT system prompt for GPT-4o with dynamic greetings, purpose, and conduct rules."""
+        if history is None:
+            history = []
+
+        # Get current time in Philippines
+        ph_time = datetime.now(pytz.timezone("Asia/Manila"))
+        hour = ph_time.hour
+        if 5 <= hour < 12:
+            greeting = "Good morning"
+        elif 12 <= hour < 18:
+            greeting = "Good afternoon"
+        else:
+            greeting = "Good evening"
+
+        return f"""You are TLC ChatMate, the official virtual front desk of The Lewis College.
+
+📌 PURPOSE: Provide immediate, accurate academic and administrative assistance using only verified college documents—reducing manual inquiry load.
+
+{greeting}! I'm here to help with your questions about enrollment, programs, policies, and services at The Lewis College.
+
+CRITICAL INSTRUCTIONS - MUST FOLLOW:
+1. Answer ONLY using the provided database information below.
+2. Do NOT use general knowledge, assumptions, or external facts.
+3. If exact info isn't in the database, say: "I'm sorry, but I don't have information about [topic] in our current records."
+4. For greetings → respond warmly with "{greeting}!" once, then assist.
+5. For farewells/compliments (e.g., "thank you", "good job") → reply politely and end conversation (e.g., "You're welcome! Have a great day.").
+6. If user uses verbal misconduct, disruptive behavior, aggression, harassment, profanity, vulgar/obscene/offensive/inappropriate language:
+   - Stay calm, neutral, and professional.
+   - Do NOT react emotionally, sarcastically, or defensively.
+   - Respond briefly: "Let's keep our conversation respectful and focused on your academic needs."
+7. NEVER insult, argue, or mirror inappropriate tone.
+
+RESPONSE RULES:
+- Keep answers concise (1–3 sentences unless listing requirements).
+- Use bullet points ONLY for: enrollment steps, fees, scholarships, checklists.
+- Language: English, Tagalog, or Bicol. If user uses other language, reply in English.
+- DO NOT say "Based on my knowledge", "I think", or invent details.
+
+DATABASE INFORMATION (ONLY source):
+----------
+{context}
+----------
+
+Conversation history (last few turns for context):
+{str(history[-4:]) if history and len(history) >= 4 else str(history)}
+
+Remember: You are TLC ChatMate — helpful, precise, and strictly factual. If it's not in the database above, you don't know it.
+"""
+
     def process_prompt(self, request: PromptRequest) -> PromptResponse:
-        print(f"Processing prompt: '{request.prompt}'")
+        """Process user prompt with isolated session history."""
+        print(f"\n{'='*60}")
+        print(f"[NEW PROMPT] Session: {request.conversationSession}")
+        print(f"[PROMPT] {request.prompt}")
+        print(f"{'='*60}")
+        
         prompt = request.prompt
         conversation_session = request.conversationSession
-        username = request.username  
+        username = request.username
+        
+        # CRITICAL FIX #1: Always start with FRESH session
+        # Verify session exists, if not create it fresh
+        if not self.session_manager.session_exists(conversation_session):
+            print(f"⚠ Session does not exist, creating new: {conversation_session}")
+            self.session_manager.create_session(
+                session_id=conversation_session,
+                user_id=username
+            )
+        
+        # Get ISOLATED history for THIS session only
+        history = self.get_session_history(conversation_session)
+        print(f"[HISTORY] Retrieved {len(history)} messages for this session")
+        self.session_manager.debug_session_state(conversation_session)
         
         intent, similarities = self.detect_intent(prompt)
         requires_auth = self.requires_authentication(intent)
         
-        print(f"Detected intent: {intent}, Requires Auth: {requires_auth}")
-        print(f"Intent similarities: {similarities}")
+        print(f"[INTENT] {intent}, Auth Required: {requires_auth}")
         
         if requires_auth:
             if username and self.is_user_authenticated(username):
-                print(f"User {username} is authenticated, processing private data request for {intent}")
+                print(f"[AUTH] User {username} authenticated, processing private data")
                 self.session = self.get_user_session(username)
                 url = self.urls.get(intent)
                 if not url:
                     return PromptResponse(
                         success=False, 
-                        response="Unable to retrieve the requested information.", 
-                        requires_auth=False, 
+                        response="Unable to retrieve the requested information.",
+                        requires_auth=False,
                         intent=intent
                     )
 
@@ -187,130 +242,105 @@ class VirtualFrontDesk(AuthDetector):
                 if private_data is None:
                     return PromptResponse(
                         success=True, 
-                        response="Session expired or unable to access your data. Please log in again.", 
-                        requires_auth=True, 
+                        response="Session expired or unable to access your data. Please log in again.",
+                        requires_auth=True,
                         intent=intent
                     )
 
-                history = self.get_session_history(conversation_session)
                 system_prompt = self._create_system_prompt(private_data, history)
                 messages = self._prepare_messages(system_prompt, history, prompt)
                 response = self.openai_client.chat.completions.create(
                     model="gpt-4o",
-                    messages=messages
-                )
-                ai_response = response.choices[0].message.content
-                print(f"AI Response with private data: {ai_response}")
-                self._update_conversation_history(conversation_session, history, prompt, ai_response)
-                
-                return PromptResponse(
-                    success=True, 
-                    response=ai_response, 
-                    requires_auth=False, 
-                    intent=intent
-                )
-            
-            else:
-                print(f"Authentication required for intent: {intent}")
-                return PromptResponse(
-                    success=True, 
-                    response="Please log in to access your private information.", 
-                    requires_auth=True, 
-                    intent=intent
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=500
                 )
 
-        print(f"Processing general query with intent: {intent}")
-            
-        history = self.get_session_history(conversation_session)
-        enhanced_query = self.extract_main_topic(prompt, history)
-        conversational_query = self.build_conversational_query(history, enhanced_query)
+                ai_response = response.choices[0].message.content
+                print(f"[AI RESPONSE] {ai_response[:100]}...")
+                
+                self._update_conversation_history(conversation_session, history, prompt, ai_response)
+                return PromptResponse(
+                    success=True,
+                    response=ai_response,
+                    requires_auth=False,
+                    intent=intent
+                )
+            else:
+                print(f"[AUTH FAILED] User not authenticated")
+                return PromptResponse(
+                    success=False,
+                    response="This information requires login.",
+                    requires_auth=True,
+                    intent=intent
+                )
         
-        # Detect if user wants archived/historical data
+        # CRITICAL FIX #2: Public query - STRICT context checking
+        print(f"[QUERY TYPE] Public query - checking database")
+        
         from VersionDetector import VersionDetector
         version_detector = VersionDetector()
         archive_settings = version_detector.should_include_archived(prompt)
         
-        # STRICT DEFAULT: Only current documents unless explicitly requested
+        # STRICT: Only current documents unless explicitly requested
         where_filter = {"is_archived": False}
         search_mode = "CURRENT ONLY"
-        archive_filter_value = False
         
         if archive_settings['include_archived']:
             if archive_settings['archived_only']:
                 where_filter = {"is_archived": True}
                 search_mode = "ARCHIVED ONLY"
-                archive_filter_value = True
             else:
                 where_filter = None  # Include both
                 search_mode = "CURRENT + ARCHIVED"
-                archive_filter_value = None
         
-        # CRITICAL: Extract program context from query for course documents
+        # Extract program context
         program_id = self._extract_program_from_query(prompt)
         
-        # Build dynamic where_filter to include program filtering
+        # Build where_filter
         if program_id:
-            # When program is detected
-            if archive_filter_value is None:
-                # Include both archived and current for this program
+            if where_filter is None:
                 where_filter = {"program_id": program_id}
-                search_mode += f" | PROGRAM: {program_id}"
             else:
-                # Combine filters: is_archived AND program_id
                 where_filter = {
                     "$and": [
-                        {"is_archived": archive_filter_value},
+                        where_filter,
                         {"program_id": program_id}
                     ]
                 }
-                search_mode += f" | PROGRAM: {program_id}"
-        else:
-            # No program detected - use archive filter only
-            # This allows general questions to work
-            if where_filter is None:
-                where_filter = None  # No filter, get all
-            # else: where_filter is already {"is_archived": False}
+            search_mode += f" | PROGRAM: {program_id}"
         
-        print(f"🔍 Search Mode: {search_mode}")
-        if where_filter:
-            print(f"📋 Filter: {where_filter}")
-        else:
-            print(f"📋 Filter: None (all documents)")
+        print(f"[SEARCH MODE] {search_mode}")
+        print(f"[WHERE FILTER] {where_filter}")
         
-        # Query with strict filtering
-        query_params = {
-            "query_texts": [conversational_query],
-            "n_results": 100
-        }
-        if where_filter:
-            query_params["where"] = where_filter
-        
-        results = self.get_collection(force_refresh=True).query(**query_params)
-        
-        # Debug: Show what we got
-        if results['metadatas'] and results['metadatas'][0]:
-            print(f"📊 Retrieved {len(results['metadatas'][0])} results")
-            archived_count = sum(1 for m in results['metadatas'][0] if m.get('is_archived', False))
-            current_count = len(results['metadatas'][0]) - archived_count
-            print(f"   Archived: {archived_count} | Current: {current_count}")
+        # Query ChromaDB
+        try:
+            collection = self.get_collection()
+            results = collection.query(
+                query_texts=[prompt],
+                n_results=10,
+                where=where_filter if where_filter else None
+            )
             
-            if program_id:
-                program_matches = sum(1 for m in results['metadatas'][0] if m.get('program_id') == program_id)
-                print(f"   Program '{program_id}' matches: {program_matches}")
+            num_results = len(results['documents'][0]) if results['documents'] else 0
+            print(f"[CHROMADB] Retrieved {num_results} documents")
             
-            # Show sample of what was retrieved
-            if results['metadatas'][0]:
-                print(f"   Sample metadata from result:")
-                sample_meta = results['metadatas'][0][0] if results['metadatas'][0] else {}
-                print(f"     - program_id: {sample_meta.get('program_id', 'N/A')}")
-                print(f"     - data_type: {sample_meta.get('data_type', 'N/A')}")
-                print(f"     - is_archived: {sample_meta.get('is_archived', 'N/A')}")
+            if num_results > 0 and results['metadatas']:
+                print(f"[METADATA] Sample: {results['metadatas'][0][0] if results['metadatas'][0] else 'None'}")
+        except Exception as e:
+            print(f"[ERROR] ChromaDB query failed: {e}")
+            results = {'documents': [[]], 'metadatas': [[]]}
         
+        # CRITICAL FIX #3: Extract context with logging
         context = self._extract_context_from_results(results)
+        context_length = len(context.strip()) if context else 0
+        print(f"[CONTEXT] Retrieved {context_length} characters")
         
+        # CRITICAL FIX #4: STRICT check - if no context, MUST return "not available"
         if not context.strip():
-            ai_response = "I'm sorry, but I don't have information about that topic in our current records. Please try asking about general school information, programs, or fees."
-            print(f"No relevant context found for query")
+            print(f"[NO CONTEXT] No matching documents found - GPT will NOT generate answer")
+            ai_response = "I'm sorry, but I don't have information about that topic in our current records."
+            print(f"[AI RESPONSE] {ai_response}")
             self._update_conversation_history(conversation_session, history, prompt, ai_response)
             
             return PromptResponse(
@@ -320,20 +350,26 @@ class VirtualFrontDesk(AuthDetector):
                 intent=intent
             )
         
-        system_prompt = self._create_system_prompt(context, history)
+        # Create STRICT system prompt that enforces database-only answers
+        system_prompt = self._create_system_prompt_strict(context, history)
         messages = self._prepare_messages(system_prompt, history, prompt)
+        
+        print(f"[GPT INPUT] {len(messages)} messages, system prompt length: {len(system_prompt)}")
         
         response = self.openai_client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            temperature=0.7,
-            max_tokens=500
+            temperature=0.5,  # Lower temperature for stricter adherence
+            max_tokens=500,
+            top_p=0.9
         )
         
         ai_response = response.choices[0].message.content
-        print(f"AI Response: {ai_response[:100]}...")
+        print(f"[AI RESPONSE] {ai_response[:150]}...")
         
+        # Update ONLY this session's history
         self._update_conversation_history(conversation_session, history, prompt, ai_response)
+        print(f"[HISTORY UPDATED] {len(history) + 2} messages in session")
         
         return PromptResponse(
             success=True,
@@ -347,7 +383,6 @@ class VirtualFrontDesk(AuthDetector):
         context_parts = []
         
         if results['documents'] and len(results['documents']) > 0:
-            # results['documents'] is a list of lists (one list per query)
             docs_list = results['documents'][0] if isinstance(results['documents'][0], list) else results['documents']
             for doc in docs_list[:10]:
                 if isinstance(doc, str) and doc and doc.strip():
@@ -356,90 +391,46 @@ class VirtualFrontDesk(AuthDetector):
         return "\n".join(context_parts)
     
     def _create_system_prompt(self, context: str, history: List[dict] = None) -> str:
+        """Legacy system prompt for authenticated data."""
         if history is None:
             history = []
         
         return f"""You are TLC Chatmate, a helpful AI assistant for The Lewis College.
 
-        INSTRUCTIONS:
-        - Answer based ONLY on the provided information.
-        - Be accurate and concise.
-        - If information is not available, say so directly.
-        - Do NOT make up or assume information.
-        - Keep responses friendly and professional.
+INSTRUCTIONS:
+- Answer based ONLY on the provided information.
+- Be accurate and concise.
+- If information is not available, say so directly.
+- Do NOT make up or assume information.
 
-        RESPONSE GUIDELINES:
-        - Provide direct, accurate answers.
-        - Use 2-3 sentences maximum for simple questions.
-        - For complex topics, organize information clearly.
-        - If clarification is needed, ask ONE specific question.
-
-        CLARIFICATION FORMAT:
-        - State what you can help with briefly (optional, 1 short phrase)
-        - Ask the clarification question directly
-        - Provide specific options or examples if applicable
-
-        If the question is clear, do NOT ask follow-up questions.
-
-        WHEN TO USE BULLET LISTS (REQUIRED):
-        - Enrollment requirements
-        - Scholarships
-        - School fees
-        - Any checklist-style or multi-item information
-
-        WHEN NOT TO USE BULLETS:
-        - Single facts (founder, start of classes, tuition only)
-        - Short informational answers
-
-        FAIL-SAFE:
-        If information is not available:
-        - Do NOT use conversational introduction
-        - Do NOT use closing line
-        - Politely state that the information is not available in a single sentence
-        - Do NOT guess or fabricate
-
-        CORRECT FORMAT WHEN INFO NOT AVAILABLE:
-        - "I'm sorry, but [specific information] is not available in our current records."
-
-        RESPONSE STRUCTURE:
-        1. Short conversational introduction (1 sentence)
-        2. Correctly formatted information (paragraph or list)
-        3. Optional polite closing line (1 sentence only)
-
-        LANGUAGE RULES:
-        - Respond only in English, Tagalog, or Bicol
-        - If another language is used, reply in English and state the language limitation
-
-        TERMINOLOGY:
-        - "Course" refers to subjects
-        - "Program" refers to degree or academic programs
-
-        GREETINGS & CLOSING:
-        - If greeted, greet back and ask how you may help
-        - If the student ends politely, respond with a professional closing
-        - Do NOT extend conversation unnecessarily
-
-        ----------
-        data:
-        {str(history[-4:]) if history and len(history) >= 4 else str(history)}
-        {context}
-        """
-
-        
+----------
+data:
+{context}
+{str(history[-4:]) if history and len(history) >= 4 else str(history)}
+"""
+    
     def _prepare_messages(self, system_prompt: str, history: List[dict], prompt: str) -> List[dict]:
+        """Prepare messages for OpenAI API."""
         messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(history[-6:])
+        # Include up to last 4 messages (2 exchanges) for context
+        messages.extend(history[-4:])
         messages.append({"role": "user", "content": prompt})
         
         return messages
         
     def _update_conversation_history(self, session_id: str, history: List[dict], prompt: str, ai_response: str) -> None:
+        """Update conversation history for specific session."""
         history.append({"role": "user", "content": prompt})
         history.append({"role": "assistant", "content": ai_response})
-        self.update_session_history(session_id, history[-4:])
-        
+        # Keep only last 4 exchanges (8 messages) per session
+        trimmed = history[-8:]
+        self.session_manager.update_history(session_id, trimmed)
+        print(f"[HISTORY] Saved {len(trimmed)} messages")
+
+
 app = FastAPI()
-vfd = VirtualFrontDesk()  
+vfd = VirtualFrontDesk()   
+
 
 @app.post("/student/login", response_model=LoginResponse)
 async def student_login(request: LoginRequest):
@@ -452,26 +443,47 @@ async def student_login(request: LoginRequest):
             test_response = session.get(vfd.urls['schedule'])
             if "login" not in test_response.url:
                 print(f"Login successful for student: {request.username}")
-                return LoginResponse( success=True, message="Login successful")
+                return LoginResponse(success=True, message="Login successful")
         
         print(f"Login failed for student: {request.username}")
-        return LoginResponse( success=False, message="Login failed", error="Invalid credentials or login failed")
+        return LoginResponse(success=False, message="Login failed", error="Invalid credentials")
         
     except Exception as e:
         print(f"Login error: {str(e)}")
-        return LoginResponse( success=False, message="Login error", error=str(e))
+        return LoginResponse(success=False, message="Login error", error=str(e))
         
+
 @app.post("/VirtualFrontDesk", response_model=PromptResponse)
 async def ask_question(request: PromptRequest):
     return vfd.process_prompt(request)
+
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "message": "ChatMate API is running"}
 
+
 @app.get("/sessions")
 async def get_sessions():
-    return {"sessions": vfd.get_all_sessions()}
+    sessions = vfd.get_all_sessions()
+    return {"sessions": sessions, "total": len(sessions)}
+
+
+@app.get("/sessions/{session_id}")
+async def get_session_info(session_id: str):
+    """Get metadata for a specific session."""
+    metadata = vfd.session_manager.get_session_metadata(session_id)
+    if not metadata:
+        return {"error": "Session not found"}
+    return metadata
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a specific session."""
+    if vfd.session_manager.delete_session(session_id):
+        return {"success": True, "message": f"Session {session_id} deleted"}
+    return {"success": False, "message": "Session not found"}
 
 
 def start_database_sync():
@@ -490,13 +502,10 @@ if __name__ == "__main__":
     print("Starting ChatMate Application...")
     print("=" * 50)
     
-    # Start database sync in a separate thread
     sync_thread = threading.Thread(target=start_database_sync, daemon=True)
     sync_thread.start()
     
-    # Give the sync service a moment to start
     time.sleep(2)
     
-    # Start the FastAPI server (this will block)
     print("\nStarting FastAPI server...")
     start_fastapi_server()
