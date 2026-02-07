@@ -210,120 +210,123 @@ class KnowledgeRepository(ChromaDBService):
                 if pattern in content_sample:
                     return program_key
         
-        return 'unknown'
+        return None
 
     def _process_handbook_data(self, conn, documents_data: List[dict]):
-        """Process handbook PDF data and collect for version detection."""
-        conn.execute("SELECT handbook_id, handbook_document, handbook_name, updated_at FROM Handbook")
-        for row in conn.fetchall():
-            handbook_id, handbook_document, handbook_name, updated_at = row
-            if handbook_document is None:
-                print(f"⚠ Handbook {handbook_id} has no document content, skipping...")
-                continue
-
-            handbook_bytes = self.decode_pdf_bytes(handbook_document)
-            content = ""
-            if handbook_bytes and isinstance(handbook_bytes, bytes):
-                try:
-                    reader = PdfReader(io.BytesIO(handbook_bytes))
-                    content = "\n".join(page.extract_text() or "" for page in reader.pages)
-                except Exception as e:
-                    print(f"✗ Error extracting PDF {handbook_id}: {e}")
+        """Extract and store handbook documents."""
+        try:
+            conn.execute("SELECT handbook_id, handbook_document, handbook_name FROM Handbook")
+            handbooks = conn.fetchall()
+            
+            for handbook_id, pdf_data, handbook_name in handbooks:
+                pdf_bytes = self.decode_pdf_bytes(pdf_data)
+                if not pdf_bytes:
+                    print(f"⚠ Could not decode handbook {handbook_id}")
                     continue
-
-            if not content.strip():
-                print(f"⚠ Handbook {handbook_id} has no extractable text content, skipping...")
-                continue
-
-            documents_data.append({
-                'id': f"handbook_{handbook_id}",
-                'name': handbook_name or "",
-                'content': content,
-                'type': 'handbook',
-                'updated_at': updated_at.strftime('%Y-%m-%d %H:%M:%S') if updated_at else ""
-            })
-
-        print(f"✓ Collected {len([d for d in documents_data if d['type'] == 'handbook'])} handbooks")
+                
+                try:
+                    pdf_stream = io.BytesIO(pdf_bytes)
+                    reader = PdfReader(pdf_stream)
+                    content = ""
+                    for page in reader.pages:
+                        content += page.extract_text()
+                    
+                    documents_data.append({
+                        'id': f'handbook_{handbook_id}',
+                        'name': handbook_name,
+                        'content': content,
+                        'type': 'handbook',
+                        'updated_at': datetime.now()
+                    })
+                    print(f"✓ Handbook {handbook_id} loaded: {len(content)} chars")
+                except Exception as e:
+                    print(f"✗ Error processing handbook {handbook_id}: {e}")
+        except Exception as e:
+            print(f"✗ Error fetching handbook data: {e}")
 
     def _process_course_data(self, conn, documents_data: List[dict]):
-        """Process course PDF data and collect for version detection."""
-        conn.execute("SELECT course_id, course_document, document_name, updated_at FROM Course")
-        for row in conn.fetchall():
-            course_id, course_document, document_name, updated_at = row
-            if course_document is None:
-                print(f"⚠ Course {course_id} has no document content, skipping...")
-                continue
-
-            course_bytes = self.decode_pdf_bytes(course_document)
-            content = ""
-            if course_bytes and isinstance(course_bytes, bytes):
-                try:
-                    reader = PdfReader(io.BytesIO(course_bytes))
-                    content = "\n".join(page.extract_text() or "" for page in reader.pages)
-                except Exception as e:
-                    print(f"✗ Error extracting PDF {course_id}: {e}")
+        """Extract and store course documents."""
+        try:
+            conn.execute("SELECT course_id, course_document, document_name FROM Course")
+            courses = conn.fetchall()
+            
+            for course_id, pdf_data, document_name in courses:
+                pdf_bytes = self.decode_pdf_bytes(pdf_data)
+                if not pdf_bytes:
+                    print(f"⚠ Could not decode course {course_id}")
                     continue
+                
+                try:
+                    pdf_stream = io.BytesIO(pdf_bytes)
+                    reader = PdfReader(pdf_stream)
+                    content = ""
+                    for page in reader.pages:
+                        content += page.extract_text()
+                    
+                    documents_data.append({
+                        'id': f'course_{course_id}',
+                        'name': document_name,
+                        'content': content,
+                        'type': 'course',
+                        'updated_at': datetime.now()
+                    })
+                    print(f"✓ Course {course_id} loaded: {len(content)} chars")
+                except Exception as e:
+                    print(f"✗ Error processing course {course_id}: {e}")
+        except Exception as e:
+            print(f"✗ Error fetching course data: {e}")
 
-            if not content.strip():
-                print(f"⚠ Course {course_id} has no extractable text content, skipping...")
-                continue
+    def _process_faq_data(self, conn, documents_data: List[dict]):
+        """Extract and store FAQ documents."""
+        try:
+            conn.execute("SELECT faq_id, question FROM faqs")
+            faqs = conn.fetchall()
+            
+            for faq_id, question in faqs:
+                if not question:
+                    continue
+                
+                documents_data.append({
+                    'id': f'faq_{faq_id}',
+                    'name': f'FAQ {faq_id}',
+                    'content': question,
+                    'type': 'faq',
+                    'updated_at': datetime.now()
+                })
+                print(f"✓ FAQ {faq_id} loaded: {len(question)} chars")
+        except Exception as e:
+            print(f"✗ Error fetching FAQ data: {e}")
 
-            documents_data.append({
-                'id': f"course_{course_id}",
-                'name': document_name or "",
-                'content': content,
-                'type': 'course',
-                'updated_at': updated_at.strftime('%Y-%m-%d %H:%M:%S') if updated_at else ""
-            })
-
-        print(f"✓ Collected {len([d for d in documents_data if d['type'] == 'course'])} courses")
-
-    def _chunk_and_store_documents(self, documents_data: List[dict], archive_status: dict, 
-                                   documents: List[str], metadata: List[dict], ids: List[str]):
-        """Chunk documents and add archive metadata with program identifier."""
+    def _chunk_and_store_documents(self, documents_data: List[dict], archive_status: dict,
+                                    documents: List[str], metadata: List[dict], ids: List[str]):
+        """Chunk documents and prepare for ChromaDB storage."""
         for doc_data in documents_data:
             doc_id = doc_data['id']
             content = doc_data['content']
+            doc_type = doc_data['type']
+            doc_name = doc_data['name']
             is_archived = archive_status.get(doc_id, False)
             
-            # Extract revision year for metadata
-            revision_info = self.version_detector.extract_all_revision_info(content)
-            revision_year = revision_info.get('year', None)
-            
-            # Extract program identifier for courses
-            program_id = None
-            if doc_data['type'] == 'course':
-                program_id = self._extract_program_identifier(content, doc_data['name'])
-            
             chunks = self.text_splitter.split_text(content)
+            
             for idx, chunk in enumerate(chunks):
                 documents.append(chunk)
                 chunk_id = f"{doc_id}_chunk_{idx}"
                 ids.append(chunk_id)
                 
-                # Build metadata with program identifier
-                meta = {
-                    "data_type": doc_data['type'],
-                    "updated_at": doc_data['updated_at'],
+                revision_info = self.version_detector.extract_all_revision_info(content)
+                program_id = self._extract_program_identifier(content, doc_name) if doc_type == 'course' else None
+                
+                metadata.append({
+                    "source_id": doc_id,
+                    "data_type": doc_type,
+                    "document_name": doc_name,
                     "chunk_index": idx,
-                    "is_archived": bool(is_archived),
-                    "document_version": "archived" if is_archived else "current"
-                }
-                
-                # Add revision year if found
-                if revision_year:
-                    meta["revision_year"] = revision_year
-                
-                # Add program-specific metadata
-                if doc_data['type'] == 'handbook':
-                    meta["handbook_id"] = doc_id.replace("handbook_", "")
-                    meta["handbook_name"] = doc_data['name']
-                elif doc_data['type'] == 'course':
-                    meta["course_id"] = doc_id.replace("course_", "")
-                    meta["document_name"] = doc_data['name']
-                    meta["program_id"] = program_id  # CRITICAL: Program identifier
-                
-                metadata.append(meta)
+                    "is_archived": is_archived,
+                    "document_version": "archived" if is_archived else "current",
+                    "revision_year": revision_info.get('year'),
+                    "program_id": program_id
+                })
         
         archived_count = sum(1 for status in archive_status.values() if status)
         current_count = len(archive_status) - archived_count
@@ -337,6 +340,7 @@ class KnowledgeRepository(ChromaDBService):
         try:
             self._process_handbook_data(conn, documents_data)
             self._process_course_data(conn, documents_data)
+            self._process_faq_data(conn, documents_data)
         except Exception as e:
             print(f"✗ Error collecting documents: {e}")
             raise
@@ -426,6 +430,8 @@ class KnowledgeRepository(ChromaDBService):
             return chunk_id.split('_chunk_')[0]
         elif chunk_id.startswith('url_'):
             return chunk_id.split('_chunk_')[0]
+        elif chunk_id.startswith('faq_'):
+            return chunk_id.split('_chunk_')[0]
         return chunk_id
 
     def debug_collection_state(self):
@@ -439,10 +445,12 @@ class KnowledgeRepository(ChromaDBService):
             handbook_ids = [id for id in all_data['ids'] if id.startswith('handbook_')]
             course_ids = [id for id in all_data['ids'] if id.startswith('course_')]
             url_ids = [id for id in all_data['ids'] if id.startswith('url_')]
+            faq_ids = [id for id in all_data['ids'] if id.startswith('faq_')]
 
             print(f"Handbook chunks: {len(handbook_ids)}")
             print(f"Course chunks: {len(course_ids)}")
             print(f"URL chunks: {len(url_ids)}")
+            print(f"FAQ chunks: {len(faq_ids)}")
 
             archived = sum(1 for meta in all_data['metadatas'] if meta.get('is_archived', False))
             current = sum(1 for meta in all_data['metadatas'] if not meta.get('is_archived', True))

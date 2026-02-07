@@ -38,6 +38,12 @@ class EventDetection:
                     url_id = url_id.rstrip('_')
                     current_ids.add(f"url_{url_id}")
 
+            conn.execute("SELECT faq_id FROM faqs")
+            for row in conn.fetchall():
+                faq_id = row[0]
+                if faq_id:
+                    current_ids.add(f"faq_{faq_id}")
+
             db.close()
             print(f"✓ Collected {len(current_ids)} current document IDs from database")
             return current_ids
@@ -60,17 +66,19 @@ class EventDetection:
                     SELECT course_id, updated_at FROM Course WHERE updated_at > %s
                     UNION ALL
                     SELECT link_url, updated_at FROM URL WHERE updated_at > %s
+                    UNION ALL
+                    SELECT faq_id, updated_at FROM faqs WHERE updated_at > %s
                 ) AS updates
-            """, (last_sync_time, last_sync_time, last_sync_time))
+            """, (last_sync_time, last_sync_time, last_sync_time, last_sync_time))
 
             update_result = conn.fetchone()
             has_updates = update_result[0] > 0 if update_result else False
 
             if has_updates:
-                print(f"🔍 Updates detected: {update_result[0]} records modified since {last_sync_time}")
+                print(f"🔔 Updates detected: {update_result[0]} records modified since {last_sync_time}")
                 return True
 
-            print("🔍 Checking for deletions...")
+            print("🔔 Checking for deletions...")
             current_doc_ids = self.get_current_document_ids()
 
             collection = self.repo.get_collection()
@@ -98,12 +106,14 @@ class EventDetection:
             course_count = conn.fetchone()[0]
             conn.execute("SELECT COUNT(*) FROM URL")
             url_count = conn.fetchone()[0]
-            total_db_records = handbook_count + course_count + url_count
+            conn.execute("SELECT COUNT(*) FROM faqs")
+            faq_count = conn.fetchone()[0]
+            total_db_records = handbook_count + course_count + url_count + faq_count
 
             unique_chroma_docs = len(chromadb_base_ids)
 
             if total_db_records != unique_chroma_docs:
-                print(f"🔍 Count mismatch: DB has {total_db_records} records, ChromaDB has {unique_chroma_docs} unique documents")
+                print(f"🔔 Count mismatch: DB has {total_db_records} records, ChromaDB has {unique_chroma_docs} unique documents")
                 return True
 
             print(f"✓ No changes detected (Last sync: {last_sync_time})")
