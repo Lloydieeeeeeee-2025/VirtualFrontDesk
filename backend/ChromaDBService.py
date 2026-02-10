@@ -5,9 +5,9 @@ from openai import OpenAI
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
 
 class ChromaDBService:
+    """Handles ChromaDB vector database operations and embeddings."""
 
     def __init__(self):
         load_dotenv()
@@ -29,22 +29,22 @@ class ChromaDBService:
     def get_collection(self, force_refresh=False):
         """Get collection with optional force refresh to see latest data."""
         if force_refresh:
-            # Reinitialize client to force reading from disk
             self.reinitialize_client()
-        
         return self.client.get_or_create_collection(name=self.collection_name)
         
     def get_embedding(self, text: str) -> List[float]:
+        """Get embedding vector for text using OpenAI API."""
         response = self.openai_client.embeddings.create(
-            model = self.embedding_model,
-            input= text
+            model=self.embedding_model,
+            input=text
         )
         return response.data[0].embedding
      
     @staticmethod    
-    def calculate_cosine_similarity(vector1: List[float], vertor2: List[float]) -> float:
+    def calculate_cosine_similarity(vector1: List[float], vector2: List[float]) -> float:
+        """Calculate cosine similarity between two vectors."""
         vector1 = np.array(vector1)
-        vector2 = np.array(vertor2)
+        vector2 = np.array(vector2)
         dot_product = np.dot(vector1, vector2)
         norm_vector1 = np.linalg.norm(vector1)
         norm_vector2 = np.linalg.norm(vector2)
@@ -54,7 +54,8 @@ class ChromaDBService:
         
         return dot_product / (norm_vector1 * norm_vector2)
     
-    def is_follow_up_question(self, current_prompt:str, previous_prompt:str, similarity_threshold: float = 0.7) -> bool:
+    def is_follow_up_question(self, current_prompt: str, previous_prompt: str, similarity_threshold: float = 0.7) -> bool:
+        """Check if current prompt is a follow-up to previous prompt."""
         if not previous_prompt:
             return False
         

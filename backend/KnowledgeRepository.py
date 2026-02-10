@@ -1,26 +1,24 @@
 import io
 import time
 import base64
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 from datetime import datetime
 from dotenv import load_dotenv
 from dbconnector.db import tlcchatmate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from ChromaDBService import ChromaDBService
 from pypdf import PdfReader
-from bs4 import BeautifulSoup
 from EventDetection import EventDetection
 from WebScraper import WebScraper
 from VersionDetector import VersionDetector
 
 
 class KnowledgeRepository(ChromaDBService):
-    """Handles synchronization between database and ChromaDB."""
+    """Handles synchronization between database and ChromaDB with incremental indexing."""
 
     def __init__(self):
         load_dotenv()
         super().__init__()
-        self.client = self.client
         self.sync_interval = 10
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
@@ -61,6 +59,7 @@ class KnowledgeRepository(ChromaDBService):
             return None
 
     def decode_pdf_bytes(self, pdf_data):
+        """Decode PDF data from various formats."""
         if pdf_data is None:
             return None
 
@@ -104,107 +103,30 @@ class KnowledgeRepository(ChromaDBService):
         )
 
     def _extract_program_identifier(self, content: str, document_name: str) -> str:
-        """
-        Extract program identifier from document content and name.
-        Returns program key like 'bsit', 'bsba_om', 'bsed_math', etc.
-        """
+        """Extract program identifier from document content and name."""
         name_lower = document_name.lower() if document_name else ""
         content_sample = content[:2000].lower() if content else ""
         
-        # Map of program identifiers with multiple pattern variations
         program_patterns = {
-            'bsit': [
-                'bachelor of science in information technology',
-                'information technology',
-                'bsit',
-                'bs in information technology'
-            ],
-            'bsba_om': [
-                'operations management',
-                'bsba om',
-                'bsba-om',
-                'bs in business administration (operations management)',
-                'bachelor of science in business administration (operations management)'
-            ],
-            'bsba_fm': [
-                'financial management',
-                'bsba fm',
-                'bsba-fm',
-                'bs in business administration (financial management)',
-                'bachelor of science in business administration (financial management)'
-            ],
-            'bsba_mm': [
-                'marketing management',
-                'bsba mm',
-                'bsba-mm',
-                'bs in business administration (marketing management)',
-                'bachelor of science in business administration (marketing management)'
-            ],
-            'bsentrep': [
-                'entrepreneurship',
-                'bsentrep',
-                'bs entrep',
-                'bs in entrepreneurship',
-                'bachelor of science in entrepreneurship'
-            ],
-            'bsed_math': [
-                'bachelor of secondary education (math)',
-                'secondary education (math)',
-                'bsed-math',
-                'bsed math',
-                'secondary education math',
-                'mathematics education',
-                'education math'
-            ],
-            'bsed_english': [
-                'bachelor of secondary education (english)',
-                'secondary education (english)',
-                'bsed-eng',
-                'bsed english',
-                'secondary education english',
-                'english education',
-                'education english'
-            ],
-            'beed': [
-                'bachelor of elementary education',
-                'elementary education',
-                'beed',
-                'bs in elementary education'
-            ],
-            'act_network': [
-                'act - networking',
-                'networking track',
-                'act network',
-                'act-network',
-                'data communications and networking'
-            ],
-            'act_data': [
-                'act - data engineering',
-                'data engineering track',
-                'act data',
-                'act-data',
-                'data management'
-            ],
-            'act_appdev': [
-                'act - applications development',
-                'applications development track',
-                'act app',
-                'act application',
-                'applications development'
-            ],
-            'tcp': [
-                'teacher certificate program',
-                'tcp'
-            ],
+            'bsit': ['bachelor of science in information technology', 'information technology', 'bsit'],
+            'bsba_om': ['operations management', 'bsba om', 'bsba-om'],
+            'bsba_fm': ['financial management', 'bsba fm', 'bsba-fm'],
+            'bsba_mm': ['marketing management', 'bsba mm', 'bsba-mm'],
+            'bsentrep': ['entrepreneurship', 'bsentrep', 'bs entrep'],
+            'bsed_math': ['bachelor of secondary education (math)', 'mathematics education'],
+            'bsed_english': ['bachelor of secondary education (english)', 'english education'],
+            'beed': ['bachelor of elementary education', 'elementary education', 'beed'],
+            'act_network': ['act - networking', 'data communications and networking'],
+            'act_data': ['act - data engineering', 'data management'],
+            'act_appdev': ['act - applications development', 'applications development'],
+            'tcp': ['teacher certificate program', 'tcp'],
         }
         
-        # Priority 1: Check document name first (highest priority)
         for program_key, patterns in program_patterns.items():
             for pattern in patterns:
                 if pattern in name_lower:
                     return program_key
         
-        # Priority 2: Check content
         for program_key, patterns in program_patterns.items():
             for pattern in patterns:
                 if pattern in content_sample:
@@ -215,13 +137,15 @@ class KnowledgeRepository(ChromaDBService):
     def _process_handbook_data(self, conn, documents_data: List[dict]):
         """Extract and store handbook documents."""
         try:
-            conn.execute("SELECT handbook_id, handbook_document, handbook_name FROM Handbook")
+            conn.execute("SELECT handbook_id, handbook_document, handbook_name, updated_at FROM Handbook "
+                        "WHERE archive_at IS NULL")
             handbooks = conn.fetchall()
+            print(f"📋 Found {len(handbooks)} non-archived handbooks to process")
             
-            for handbook_id, pdf_data, handbook_name in handbooks:
+            for handbook_id, pdf_data, handbook_name, updated_at in handbooks:
                 pdf_bytes = self.decode_pdf_bytes(pdf_data)
                 if not pdf_bytes:
-                    print(f"⚠ Could not decode handbook {handbook_id}")
+                    print(f"⚠️ Could not decode handbook {handbook_id}")
                     continue
                 
                 try:
@@ -229,14 +153,20 @@ class KnowledgeRepository(ChromaDBService):
                     reader = PdfReader(pdf_stream)
                     content = ""
                     for page in reader.pages:
-                        content += page.extract_text()
+                        text = page.extract_text()
+                        if text:
+                            content += text
+                    
+                    if not content or len(content.strip()) == 0:
+                        print(f"⚠️ Handbook {handbook_id} has no extractable text content")
+                        continue
                     
                     documents_data.append({
                         'id': f'handbook_{handbook_id}',
                         'name': handbook_name,
                         'content': content,
                         'type': 'handbook',
-                        'updated_at': datetime.now()
+                        'updated_at': updated_at
                     })
                     print(f"✓ Handbook {handbook_id} loaded: {len(content)} chars")
                 except Exception as e:
@@ -247,13 +177,15 @@ class KnowledgeRepository(ChromaDBService):
     def _process_course_data(self, conn, documents_data: List[dict]):
         """Extract and store course documents."""
         try:
-            conn.execute("SELECT course_id, course_document, document_name FROM Course")
+            conn.execute("SELECT course_id, course_document, document_name, updated_at FROM Course "
+                        "WHERE archive_at IS NULL")
             courses = conn.fetchall()
+            print(f"📋 Found {len(courses)} non-archived courses to process")
             
-            for course_id, pdf_data, document_name in courses:
+            for course_id, pdf_data, document_name, updated_at in courses:
                 pdf_bytes = self.decode_pdf_bytes(pdf_data)
                 if not pdf_bytes:
-                    print(f"⚠ Could not decode course {course_id}")
+                    print(f"⚠️ Could not decode course {course_id}")
                     continue
                 
                 try:
@@ -261,14 +193,20 @@ class KnowledgeRepository(ChromaDBService):
                     reader = PdfReader(pdf_stream)
                     content = ""
                     for page in reader.pages:
-                        content += page.extract_text()
+                        text = page.extract_text()
+                        if text:
+                            content += text
+                    
+                    if not content or len(content.strip()) == 0:
+                        print(f"⚠️ Course {course_id} has no extractable text content")
+                        continue
                     
                     documents_data.append({
                         'id': f'course_{course_id}',
                         'name': document_name,
                         'content': content,
                         'type': 'course',
-                        'updated_at': datetime.now()
+                        'updated_at': updated_at
                     })
                     print(f"✓ Course {course_id} loaded: {len(content)} chars")
                 except Exception as e:
@@ -279,10 +217,10 @@ class KnowledgeRepository(ChromaDBService):
     def _process_faq_data(self, conn, documents_data: List[dict]):
         """Extract and store FAQ documents."""
         try:
-            conn.execute("SELECT faq_id, question FROM faqs")
+            conn.execute("SELECT faq_id, question, updated_at FROM faqs")
             faqs = conn.fetchall()
             
-            for faq_id, question in faqs:
+            for faq_id, question, updated_at in faqs:
                 if not question:
                     continue
                 
@@ -291,23 +229,28 @@ class KnowledgeRepository(ChromaDBService):
                     'name': f'FAQ {faq_id}',
                     'content': question,
                     'type': 'faq',
-                    'updated_at': datetime.now()
+                    'updated_at': updated_at
                 })
                 print(f"✓ FAQ {faq_id} loaded: {len(question)} chars")
         except Exception as e:
             print(f"✗ Error fetching FAQ data: {e}")
 
-    def _chunk_and_store_documents(self, documents_data: List[dict], archive_status: dict,
+    def _chunk_and_store_documents(self, documents_data: List[dict], archive_status: Dict,
                                     documents: List[str], metadata: List[dict], ids: List[str]):
         """Chunk documents and prepare for ChromaDB storage."""
+        print(f"\n📊 Chunking {len(documents_data)} documents...")
+        
         for doc_data in documents_data:
             doc_id = doc_data['id']
             content = doc_data['content']
             doc_type = doc_data['type']
             doc_name = doc_data['name']
-            is_archived = archive_status.get(doc_id, False)
+            archive_info = archive_status.get(doc_id, {'is_archived': False})
+            is_archived = archive_info.get('is_archived', False)
             
             chunks = self.text_splitter.split_text(content)
+            status = "ARCHIVED" if is_archived else "CURRENT"
+            print(f"   📄 {doc_id} ({status}): {len(chunks)} chunks from {len(content)} chars")
             
             for idx, chunk in enumerate(chunks):
                 documents.append(chunk)
@@ -328,11 +271,46 @@ class KnowledgeRepository(ChromaDBService):
                     "program_id": program_id
                 })
         
-        archived_count = sum(1 for status in archive_status.values() if status)
+        archived_count = sum(1 for info in archive_status.values() if info.get('is_archived'))
         current_count = len(archive_status) - archived_count
-        print(f"📦 Archived: {archived_count} | ✓ Current: {current_count}")
+        print(f"\n📦 Chunking complete:")
+        print(f"   Total chunks: {len(ids)}")
+        print(f"   Archived documents: {archived_count}")
+        print(f"   Current documents: {current_count}")
 
-    def collect_all_documents(self, conn) -> Tuple[List[str], List[dict], List[str]]:
+    def _update_archive_status_in_db(self, db, archive_status: Dict):
+        """Update archive status in database for archived documents."""
+        try:
+            conn = db.cursor()
+            updated_count = 0
+            
+            for doc_id, archive_info in archive_status.items():
+                if archive_info.get('is_archived'):
+                    if doc_id.startswith('handbook_'):
+                        handbook_id = doc_id.replace('handbook_', '')
+                        conn.execute("UPDATE Handbook SET archive_at = NOW() WHERE handbook_id = %s",
+                                    (handbook_id,))
+                        print(f"✓ Archived handbook_{handbook_id}")
+                        updated_count += 1
+                    
+                    elif doc_id.startswith('course_'):
+                        course_id = doc_id.replace('course_', '')
+                        conn.execute("UPDATE Course SET archive_at = NOW() WHERE course_id = %s",
+                                    (course_id,))
+                        print(f"✓ Archived course_{course_id}")
+                        updated_count += 1
+            
+            if updated_count > 0:
+                db.commit()
+                print(f"✓ {updated_count} documents archived in database")
+            else:
+                print("✓ No documents needed archiving")
+                
+        except Exception as e:
+            print(f"✗ Error updating archive status: {e}")
+            db.rollback()
+
+    def collect_all_documents(self, conn) -> Tuple[List[str], List[dict], List[str], Dict]:
         """Collect all documents from database and websites with version detection."""
         documents, metadata, ids = [], [], []
         documents_data = []
@@ -351,17 +329,17 @@ class KnowledgeRepository(ChromaDBService):
         self._chunk_and_store_documents(documents_data, archive_status, documents, metadata, ids)
 
         try:
-            print("🕸️ Collecting website data...")
-            scraped_data = self.web_scraper.scrape_all_websites()
+            print("🌐 Collecting website data...")
+            scraped_data = self.web_scraper.scrape_all_websites(self)
             if scraped_data:
                 self.web_scraper.process_scraped_content(scraped_data, documents, metadata, ids, self.text_splitter)
         except Exception as e:
             print(f"✗ Error processing website data: {e}")
 
-        return documents, metadata, ids
+        return documents, metadata, ids, archive_status
 
     def sync_data_to_chromadb(self) -> bool:
-        """Main function to sync database data to ChromaDB - FULL RECREATION WITH CLEANUP."""
+        """Main function to sync database data to ChromaDB with full recreation."""
         db = self.get_db_connection()
         if not db:
             return False
@@ -370,19 +348,22 @@ class KnowledgeRepository(ChromaDBService):
             conn = db.cursor()
             print("✓ Database connection established")
             
-            # CRITICAL: Clean up orphaned collections first
             print("\n🧹 Performing collection cleanup...")
             self._cleanup_all_collections()
             
             print("\n🔥 Collecting all current documents from database...")
-            documents, metadata, ids = self.collect_all_documents(conn)
+            documents, metadata, ids, archive_status = self.collect_all_documents(conn)
 
             if not documents:
-                print("⚠ No documents to sync")
+                print("⚠️ No documents to sync")
                 db.close()
                 return False
 
             print(f"✓ Collected {len(documents)} documents to sync")
+
+            # Update archive status in database
+            print("\n📋 Updating archive status in database...")
+            self._update_archive_status_in_db(db, archive_status)
 
             try:
                 print(f"🗑️ Attempting to delete collection '{self.collection_name}'...")
@@ -457,7 +438,6 @@ class KnowledgeRepository(ChromaDBService):
             print(f"📦 Archived chunks: {archived}")
             print(f"✓ Current chunks: {current}")
 
-            # Show sample metadata
             if all_data['metadatas']:
                 print("\n📋 Sample metadata (first 3):")
                 for i, meta in enumerate(all_data['metadatas'][:3]):
@@ -506,7 +486,6 @@ class KnowledgeRepository(ChromaDBService):
 
                 try:
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Checking for changes...")
-                    self.debug_collection_state()
 
                     if self.event_detector.check_for_updates(check_db, last_sync_time):
                         print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ⚡ CHANGES DETECTED! Recreating entire collection...")

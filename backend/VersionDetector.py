@@ -22,7 +22,6 @@ class VersionDetector:
             r'\d{1,2}[/-]\d{1,2}[/-](\d{4})',
         ]
         
-        # Document type identifiers for content-based grouping
         self.document_type_keywords = {
             'student_handbook': [
                 'student handbook', 'student affairs', 'code of conduct', 
@@ -35,7 +34,6 @@ class VersionDetector:
             ]
         }
         
-        # Program-specific course identifiers - DO NOT GROUP TOGETHER
         self.program_identifiers = {
             'bsit': ['bachelor of science in information technology', 'bsit', 'information technology'],
             'bsba_om': ['operations management', 'bsba om', 'bsba-om'],
@@ -100,7 +98,7 @@ class VersionDetector:
                 if keyword in name_lower:
                     score += 5
             
-            if score >= 5:  # Threshold for program identification
+            if score >= 5:
                 return program_key
         
         return None
@@ -110,14 +108,12 @@ class VersionDetector:
         content_sample = content[:5000].lower()
         name_lower = name.lower()
         
-        # First check if it's a course document
         if doc_type == 'course':
             program = self._detect_program_type(content, name)
             if program:
-                return f"course_{program}"  # e.g., "course_bsit"
+                return f"course_{program}"
             return "course_unknown"
         
-        # For handbooks, check type
         type_scores = {}
         for doc_type_key, keywords in self.document_type_keywords.items():
             score = 0
@@ -133,24 +129,27 @@ class VersionDetector:
         
         return 'unknown'
     
-    def determine_archive_status(self, documents_data: List[Dict]) -> Dict[str, bool]:
+    def determine_archive_status(self, documents_data: List[Dict]) -> Dict[str, Dict]:
         """
         Determine which documents should be archived based on version supersession.
         
         Returns:
-            Dict mapping document_id to archive status (True = archived, False = current)
+            Dict mapping document_id to {'is_archived': bool, 'archive_at': datetime or None}
         """
         archive_status = {}
         grouped_docs = self._group_similar_documents(documents_data)
         
-        print(f"\n📊 Grouped {len(documents_data)} documents into {len(grouped_docs)} groups")
+        print(f"\n📦 Grouped {len(documents_data)} documents into {len(grouped_docs)} groups")
         
         for group_key, docs in grouped_docs.items():
             print(f"\n🔍 Analyzing group: {group_key}")
             print(f"   Documents in group: {len(docs)}")
             
             if len(docs) == 1:
-                archive_status[docs[0]['id']] = False
+                archive_status[docs[0]['id']] = {
+                    'is_archived': False,
+                    'archive_at': None
+                }
                 print(f"   ✓ Single document: {docs[0]['id']} (CURRENT)")
             else:
                 docs_with_info = []
@@ -166,7 +165,7 @@ class VersionDetector:
                         'has_revision_info': revision_info['has_revision_info']
                     })
                     
-                    print(f"   📄 {doc['id']} ({doc['name']}): year={revision_info['year']}, mentions={revision_info['mentions']}")
+                    print(f"   📄 {doc['id']}: year={revision_info['year']}, mentions={revision_info['mentions']}")
                 
                 docs_with_info.sort(
                     key=lambda x: (
@@ -178,12 +177,17 @@ class VersionDetector:
                     reverse=True
                 )
                 
+                archive_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
                 for idx, doc in enumerate(docs_with_info):
                     is_archived = (idx > 0)
-                    archive_status[doc['id']] = is_archived
+                    archive_status[doc['id']] = {
+                        'is_archived': is_archived,
+                        'archive_at': archive_time if is_archived else None
+                    }
                     
                     status = "ARCHIVED" if is_archived else "CURRENT"
-                    print(f"   {'📦' if is_archived else '✓'} {status}: {doc['id']} (Year: {doc['year'] if doc['year'] else 'N/A'})")
+                    print(f"   {'📦' if is_archived else '✓'} {status}: {doc['id']}")
         
         return archive_status
     
@@ -196,17 +200,14 @@ class VersionDetector:
             doc_name = doc.get('name', '')
             doc_content = doc.get('content', '')
             
-            # Detect document type from content
             detected_type = self._detect_document_type(doc_content, doc_name, doc_type)
-            
-            # Create group key: data_type_detected_content_type
             group_key = f"{doc_type}_{detected_type}"
             
             if group_key not in groups:
                 groups[group_key] = []
             groups[group_key].append(doc)
             
-            print(f"   📑 {doc['id']} ({doc_name}) → detected as '{detected_type}'")
+            print(f"   📋 {doc['id']} → '{detected_type}'")
         
         return groups
     
@@ -225,8 +226,7 @@ class VersionDetector:
         historical_keywords = [
             'last year', 'previous', 'old', 'before', 'was', 'were',
             'history', 'historical', 'past', 'earlier', 'former',
-            'previous version', 'old version', 'archived', 'according to the',
-            'based on the', 'in the old', 'what was'
+            'previous version', 'old version', 'archived'
         ]
         
         current_keywords = [
