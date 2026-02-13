@@ -19,7 +19,6 @@ class KnowledgeRepository(ChromaDBService):
     def __init__(self):
         load_dotenv()
         super().__init__()
-        self.sync_interval = 10
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
@@ -29,6 +28,22 @@ class KnowledgeRepository(ChromaDBService):
         self.event_detector = EventDetection(self)
         self.web_scraper = WebScraper()
         self.version_detector = VersionDetector()
+
+        # Progress tracking
+        self.progress = {
+            "step": None,  # Analyzing, Chunking, Scraping, Completed
+            "status": "idle"  # idle, running, completed, error
+        }
+
+    def set_progress(self, step: str, status: str = "running"):
+        """Update the current progress."""
+        self.progress["step"] = step
+        self.progress["status"] = status
+        print(f"[Progress] {step} - {status}")
+
+    def get_progress(self):
+        """Get the current progress."""
+        return self.progress
 
     def _cleanup_all_collections(self):
         """Delete ALL orphaned collections and keep only the current one."""
@@ -43,8 +58,8 @@ class KnowledgeRepository(ChromaDBService):
                     try:
                         self.client.delete_collection(name=col_name)
                         print(f"   ✓ Deleted: {col_name}")
-                    except Exception as e:
-                        print(f"   ✗ Failed to delete {col_name}: {e}")
+                    except Exception:
+                        pass
             
             print(f"✓ Cleanup complete - only '{self.collection_name}' will remain")
         except Exception as e:
@@ -145,7 +160,6 @@ class KnowledgeRepository(ChromaDBService):
             for handbook_id, pdf_data, handbook_name, updated_at in handbooks:
                 pdf_bytes = self.decode_pdf_bytes(pdf_data)
                 if not pdf_bytes:
-                    print(f"⚠️ Could not decode handbook {handbook_id}")
                     continue
                 
                 try:
@@ -158,7 +172,6 @@ class KnowledgeRepository(ChromaDBService):
                             content += text
                     
                     if not content or len(content.strip()) == 0:
-                        print(f"⚠️ Handbook {handbook_id} has no extractable text content")
                         continue
                     
                     documents_data.append({
@@ -168,7 +181,6 @@ class KnowledgeRepository(ChromaDBService):
                         'type': 'handbook',
                         'updated_at': updated_at
                     })
-                    print(f"✓ Handbook {handbook_id} loaded: {len(content)} chars")
                 except Exception as e:
                     print(f"✗ Error processing handbook {handbook_id}: {e}")
         except Exception as e:
@@ -185,7 +197,6 @@ class KnowledgeRepository(ChromaDBService):
             for course_id, pdf_data, document_name, updated_at in courses:
                 pdf_bytes = self.decode_pdf_bytes(pdf_data)
                 if not pdf_bytes:
-                    print(f"⚠️ Could not decode course {course_id}")
                     continue
                 
                 try:
@@ -198,7 +209,6 @@ class KnowledgeRepository(ChromaDBService):
                             content += text
                     
                     if not content or len(content.strip()) == 0:
-                        print(f"⚠️ Course {course_id} has no extractable text content")
                         continue
                     
                     documents_data.append({
@@ -208,7 +218,6 @@ class KnowledgeRepository(ChromaDBService):
                         'type': 'course',
                         'updated_at': updated_at
                     })
-                    print(f"✓ Course {course_id} loaded: {len(content)} chars")
                 except Exception as e:
                     print(f"✗ Error processing course {course_id}: {e}")
         except Exception as e:
@@ -231,7 +240,6 @@ class KnowledgeRepository(ChromaDBService):
                     'type': 'faq',
                     'updated_at': updated_at
                 })
-                print(f"✓ FAQ {faq_id} loaded: {len(question)} chars")
         except Exception as e:
             print(f"✗ Error fetching FAQ data: {e}")
 
@@ -249,8 +257,6 @@ class KnowledgeRepository(ChromaDBService):
             is_archived = archive_info.get('is_archived', False)
             
             chunks = self.text_splitter.split_text(content)
-            status = "ARCHIVED" if is_archived else "CURRENT"
-            print(f"   📄 {doc_id} ({status}): {len(chunks)} chunks from {len(content)} chars")
             
             for idx, chunk in enumerate(chunks):
                 documents.append(chunk)
@@ -271,12 +277,7 @@ class KnowledgeRepository(ChromaDBService):
                     "program_id": program_id
                 })
         
-        archived_count = sum(1 for info in archive_status.values() if info.get('is_archived'))
-        current_count = len(archive_status) - archived_count
-        print(f"\n📦 Chunking complete:")
-        print(f"   Total chunks: {len(ids)}")
-        print(f"   Archived documents: {archived_count}")
-        print(f"   Current documents: {current_count}")
+        print(f"\n📦 Chunking complete. Total chunks: {len(ids)}")
 
     def _update_archive_status_in_db(self, db, archive_status: Dict):
         """Update archive status in database for archived documents."""
@@ -290,21 +291,17 @@ class KnowledgeRepository(ChromaDBService):
                         handbook_id = doc_id.replace('handbook_', '')
                         conn.execute("UPDATE Handbook SET archive_at = NOW() WHERE handbook_id = %s",
                                     (handbook_id,))
-                        print(f"✓ Archived handbook_{handbook_id}")
                         updated_count += 1
                     
                     elif doc_id.startswith('course_'):
                         course_id = doc_id.replace('course_', '')
                         conn.execute("UPDATE Course SET archive_at = NOW() WHERE course_id = %s",
                                     (course_id,))
-                        print(f"✓ Archived course_{course_id}")
                         updated_count += 1
             
             if updated_count > 0:
                 db.commit()
                 print(f"✓ {updated_count} documents archived in database")
-            else:
-                print("✓ No documents needed archiving")
                 
         except Exception as e:
             print(f"✗ Error updating archive status: {e}")
@@ -316,6 +313,7 @@ class KnowledgeRepository(ChromaDBService):
         documents_data = []
 
         try:
+            self.set_progress("Analyzing")
             self._process_handbook_data(conn, documents_data)
             self._process_course_data(conn, documents_data)
             self._process_faq_data(conn, documents_data)
@@ -326,9 +324,11 @@ class KnowledgeRepository(ChromaDBService):
         print("\n🔍 Analyzing document versions...")
         archive_status = self.version_detector.determine_archive_status(documents_data)
 
+        self.set_progress("Chunking")
         self._chunk_and_store_documents(documents_data, archive_status, documents, metadata, ids)
 
         try:
+            self.set_progress("Scraping")
             print("🌐 Collecting website data...")
             scraped_data = self.web_scraper.scrape_all_websites(self)
             if scraped_data:
@@ -342,64 +342,66 @@ class KnowledgeRepository(ChromaDBService):
         """Main function to sync database data to ChromaDB with full recreation."""
         db = self.get_db_connection()
         if not db:
+            self.set_progress("Error", "error")
             return False
 
         try:
             conn = db.cursor()
-            print("✓ Database connection established")
+            self.set_progress("Starting", "running")
             
-            print("\n🧹 Performing collection cleanup...")
             self._cleanup_all_collections()
             
-            print("\n🔥 Collecting all current documents from database...")
+            # collect_all_documents handles Analyzing, Chunking, Scraping progress updates
             documents, metadata, ids, archive_status = self.collect_all_documents(conn)
 
             if not documents:
-                print("⚠️ No documents to sync")
                 db.close()
+                self.set_progress("Completed", "completed")
                 return False
 
-            print(f"✓ Collected {len(documents)} documents to sync")
-
-            # Update archive status in database
-            print("\n📋 Updating archive status in database...")
             self._update_archive_status_in_db(db, archive_status)
 
             try:
-                print(f"🗑️ Attempting to delete collection '{self.collection_name}'...")
                 self.client.delete_collection(name=self.collection_name)
-                print(f"✓ Successfully deleted old collection '{self.collection_name}'")
-            except Exception as e:
-                print(f"ℹ️ Collection didn't exist or couldn't be deleted: {e}")
+            except Exception:
+                pass
 
-            print(f"🆕 Creating new collection '{self.collection_name}'...")
             collection = self.client.create_collection(
                 name=self.collection_name,
                 metadata={"hnsw:space": "cosine"}
             )
-            print(f"✓ Created new collection '{self.collection_name}'")
-
-            print("📤 Adding documents to new collection...")
+            
             collection.upsert(documents=documents, metadatas=metadata, ids=ids)
-            print(f"✓ Successfully added {len(documents)} documents to new collection")
-
+            
             current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self.update_sync_time(collection, current_time)
-            print(f"✓ Sync timestamp updated: {current_time}")
-
-            count = collection.count()
-            print(f"✅ Verification: Collection now contains {count} items")
-
+            
             db.close()
+            self.set_progress("Completed", "completed")
             return True
 
         except Exception as e:
-            print(f"✗ Sync failed: {e}")
-            import traceback
-            traceback.print_exc()
             if db:
                 db.close()
+            self.set_progress("Error", "error")
             return False
+
+    def check_updates_available(self) -> bool:
+        """Check if there are any updates available in the database."""
+        db = self.get_db_connection()
+        if not db:
+            return False
+        
+        try:
+            collection = self.get_collection()
+            last_sync_time = self.get_last_sync_time(collection)
+            return self.event_detector.check_for_updates(db, last_sync_time)
+        except Exception as e:
+            print(f"Error checking updates: {e}")
+            return False
+        finally:
+            if db:
+                db.close()
 
     def _extract_base_id(self, chunk_id: str) -> str:
         """Extract base document ID from chunk ID.""" 
@@ -414,105 +416,3 @@ class KnowledgeRepository(ChromaDBService):
         elif chunk_id.startswith('faq_'):
             return chunk_id.split('_chunk_')[0]
         return chunk_id
-
-    def debug_collection_state(self):
-        """Debug method to see what's in the collection."""
-        try:
-            collection = self.get_collection()
-            all_data = collection.get()
-            print("\n🔍 DEBUG - Collection State:")
-            print(f"Total items: {len(all_data['ids'])}")
-
-            handbook_ids = [id for id in all_data['ids'] if id.startswith('handbook_')]
-            course_ids = [id for id in all_data['ids'] if id.startswith('course_')]
-            url_ids = [id for id in all_data['ids'] if id.startswith('url_')]
-            faq_ids = [id for id in all_data['ids'] if id.startswith('faq_')]
-
-            print(f"Handbook chunks: {len(handbook_ids)}")
-            print(f"Course chunks: {len(course_ids)}")
-            print(f"URL chunks: {len(url_ids)}")
-            print(f"FAQ chunks: {len(faq_ids)}")
-
-            archived = sum(1 for meta in all_data['metadatas'] if meta.get('is_archived', False))
-            current = sum(1 for meta in all_data['metadatas'] if not meta.get('is_archived', True))
-            print(f"📦 Archived chunks: {archived}")
-            print(f"✓ Current chunks: {current}")
-
-            if all_data['metadatas']:
-                print("\n📋 Sample metadata (first 3):")
-                for i, meta in enumerate(all_data['metadatas'][:3]):
-                    program_id = meta.get('program_id', 'N/A')
-                    print(f"  [{i+1}] is_archived={meta.get('is_archived')}, "
-                          f"version={meta.get('document_version')}, "
-                          f"year={meta.get('revision_year', 'N/A')}, "
-                          f"program={program_id}")
-
-            unique_docs = set()
-            for doc_id in all_data['ids']:
-                base_id = self._extract_base_id(doc_id)
-                if base_id:
-                    unique_docs.add(base_id)
-
-            print(f"\nUnique documents: {len(unique_docs)}")
-            return True
-        except Exception as e:
-            print(f"✗ Debug failed: {e}")
-            return False
-
-    def run_continuous_sync(self):
-        """Continuously monitor for updates and sync when needed."""
-        print("=" * 60)
-        print("TLC Chatmate - Database Sync Service")
-        print("=" * 60)
-
-        print("\n[INITIAL SYNC]")
-        if self.sync_data_to_chromadb():
-            print("✓ Initial sync completed successfully")
-            self.debug_collection_state()
-        else:
-            print("✗ Initial sync failed\n")
-            return
-
-        last_sync_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"\n📊 Monitoring for updates (checking every {self.sync_interval} seconds)...")
-        print("Press Ctrl+C to stop\n")
-
-        try:
-            while True:
-                time.sleep(self.sync_interval)
-                check_db = self.get_db_connection()
-                if not check_db:
-                    continue
-
-                try:
-                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Checking for changes...")
-
-                    if self.event_detector.check_for_updates(check_db, last_sync_time):
-                        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ⚡ CHANGES DETECTED! Recreating entire collection...")
-                        check_db.close()
-                        if self.sync_data_to_chromadb():
-                            last_sync_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                            print(f"✓ Collection completely recreated at {last_sync_time}")
-                            self.debug_collection_state()
-                            print()
-                        else:
-                            print("✗ Collection recreation failed\n")
-                    else:
-                        check_db.close()
-                except Exception as e:
-                    print(f"✗ Error during sync check: {e}")
-                    if check_db:
-                        check_db.close()
-
-        except KeyboardInterrupt:
-            print("\n\n🛑 Stopping sync service...")
-            print("=" * 60)
-
-
-def main():
-    synchronizer = KnowledgeRepository()
-    synchronizer.run_continuous_sync()
-
-
-if __name__ == "__main__":
-    main()

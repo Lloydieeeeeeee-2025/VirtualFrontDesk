@@ -2,11 +2,12 @@ import time
 import uvicorn
 import requests
 import threading
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from typing import Dict, List, Optional
 from SessionManager import SessionManager
 from ChromaDBService import ChromaDBService
+from KnowledgeRepository import KnowledgeRepository
 import pytz
 from datetime import datetime
 from openai import OpenAI
@@ -312,6 +313,18 @@ Conversation history (last few turns for context):
 
 app = FastAPI()
 vfd = VirtualFrontDesk()
+knowledge_repo = KnowledgeRepository()
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Run initial sync on startup."""
+    def initial_sync():
+        print("Starting initial database sync...")
+        knowledge_repo.sync_data_to_chromadb()
+    
+    sync_thread = threading.Thread(target=initial_sync, daemon=True)
+    sync_thread.start()
 
 
 @app.post("/student/login", response_model=LoginResponse)
@@ -357,11 +370,27 @@ async def delete_session(session_id: str):
     return {"success": False, "message": "Session not found"}
 
 
-def start_database_sync():
-    """Start the database synchronization service in a separate thread."""
-    from KnowledgeRepository import KnowledgeRepository
-    synchronizer = KnowledgeRepository()
-    synchronizer.run_continuous_sync()
+@app.get("/admin/sync-status")
+async def get_sync_status():
+    """Get the current synchronization status."""
+    return knowledge_repo.get_progress()
+
+
+@app.post("/admin/sync")
+async def trigger_sync(background_tasks: BackgroundTasks):
+    """Trigger a manual synchronization."""
+    if knowledge_repo.progress["status"] == "running":
+         return {"success": False, "message": "Sync already in progress"}
+    
+    background_tasks.add_task(knowledge_repo.sync_data_to_chromadb)
+    return {"success": True, "message": "Sync started"}
+
+
+@app.get("/admin/check-updates")
+async def check_updates():
+    """Check if updates are available."""
+    has_updates = knowledge_repo.check_updates_available()
+    return {"updates_available": has_updates}
 
 
 def start_fastapi_server():
@@ -372,11 +401,6 @@ def start_fastapi_server():
 if __name__ == "__main__":
     print("Starting ChatMate Application...")
     print("=" * 50)
-    
-    sync_thread = threading.Thread(target=start_database_sync, daemon=True)
-    sync_thread.start()
-    
-    time.sleep(2)
     
     print("\nStarting FastAPI server...")
     start_fastapi_server()
