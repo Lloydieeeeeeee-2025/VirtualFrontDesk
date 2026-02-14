@@ -18,19 +18,19 @@ class EventDetection:
         try:
             conn = db.cursor()
 
-            conn.execute("SELECT handbook_id FROM Handbook WHERE archive_at IS NULL")
+            conn.execute("SELECT handbook_id FROM handbook WHERE archive_at IS NULL")
             for row in conn.fetchall():
                 handbook_id = row[0]
                 if handbook_id:
                     current_ids.add(f"handbook_{handbook_id}")
 
-            conn.execute("SELECT course_id FROM Course WHERE archive_at IS NULL")
+            conn.execute("SELECT course_id FROM course WHERE archive_at IS NULL")
             for row in conn.fetchall():
                 course_id = row[0]
                 if course_id:
                     current_ids.add(f"course_{course_id}")
 
-            conn.execute("SELECT link_url FROM URL")
+            conn.execute("SELECT link_url FROM url")
             for row in conn.fetchall():
                 url = row[0]
                 if url:
@@ -65,13 +65,13 @@ class EventDetection:
 
             # Check for updated/inserted records
             conn.execute("""
-                SELECT 'handbook' as type, handbook_id as id FROM Handbook 
+                SELECT 'handbook' as type, handbook_id as id FROM handbook 
                 WHERE updated_at > %s AND archive_at IS NULL
                 UNION ALL
-                SELECT 'course', course_id FROM Course 
+                SELECT 'course', course_id FROM course 
                 WHERE updated_at > %s AND archive_at IS NULL
                 UNION ALL
-                SELECT 'url', link_url FROM URL 
+                SELECT 'url', link_url FROM url 
                 WHERE updated_at > %s
                 UNION ALL
                 SELECT 'faq', faq_id FROM faqs 
@@ -114,13 +114,13 @@ class EventDetection:
             # Check for updates
             conn.execute("""
                 SELECT COUNT(*) FROM (
-                    SELECT handbook_id, updated_at FROM Handbook 
+                    SELECT handbook_id, updated_at FROM handbook 
                     WHERE updated_at > %s AND archive_at IS NULL
                     UNION ALL
-                    SELECT course_id, updated_at FROM Course 
+                    SELECT course_id, updated_at FROM course 
                     WHERE updated_at > %s AND archive_at IS NULL
                     UNION ALL
-                    SELECT link_url, updated_at FROM URL 
+                    SELECT link_url, updated_at FROM url 
                     WHERE updated_at > %s
                     UNION ALL
                     SELECT faq_id, updated_at FROM faqs 

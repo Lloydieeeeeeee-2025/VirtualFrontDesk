@@ -146,7 +146,7 @@ class KnowledgeRepository(ChromaDBService):
     def _process_handbook_data(self, conn, documents_data: List[dict]):
         """Extract and store handbook documents."""
         try:
-            conn.execute("SELECT handbook_id, handbook_document, handbook_name, updated_at FROM Handbook "
+            conn.execute("SELECT handbook_id, handbook_document, handbook_name, updated_at FROM handbook "
                         "WHERE archive_at IS NULL")
             handbooks = conn.fetchall()
             print(f"Found {len(handbooks)} non-archived handbooks to process")
@@ -183,7 +183,7 @@ class KnowledgeRepository(ChromaDBService):
     def _process_course_data(self, conn, documents_data: List[dict]):
         """Extract and store course documents."""
         try:
-            conn.execute("SELECT course_id, course_document, document_name, updated_at FROM Course "
+            conn.execute("SELECT course_id, course_document, document_name, updated_at FROM course "
                         "WHERE archive_at IS NULL")
             courses = conn.fetchall()
             print(f"Found {len(courses)} non-archived courses to process")
@@ -283,13 +283,13 @@ class KnowledgeRepository(ChromaDBService):
                 if archive_info.get('is_archived'):
                     if doc_id.startswith('handbook_'):
                         handbook_id = doc_id.replace('handbook_', '')
-                        conn.execute("UPDATE Handbook SET archive_at = NOW() WHERE handbook_id = %s",
+                        conn.execute("UPDATE handbook SET archive_at = NOW() WHERE handbook_id = %s",
                                     (handbook_id,))
                         updated_count += 1
                     
                     elif doc_id.startswith('course_'):
                         course_id = doc_id.replace('course_', '')
-                        conn.execute("UPDATE Course SET archive_at = NOW() WHERE course_id = %s",
+                        conn.execute("UPDATE course SET archive_at = NOW() WHERE course_id = %s",
                                     (course_id,))
                         updated_count += 1
             

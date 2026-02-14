@@ -23,7 +23,7 @@ class WebScraper:
 
         try:
             conn = db.cursor()
-            conn.execute("SELECT link_url, description, updated_at FROM URL")
+            conn.execute("SELECT link_url, description, updated_at FROM url")
             urls = [
                 {
                     "url": row[0],
