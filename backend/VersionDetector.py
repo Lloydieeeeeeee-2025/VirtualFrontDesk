@@ -139,18 +139,12 @@ class VersionDetector:
         archive_status = {}
         grouped_docs = self._group_similar_documents(documents_data)
         
-        print(f"\n📦 Grouped {len(documents_data)} documents into {len(grouped_docs)} groups")
-        
         for group_key, docs in grouped_docs.items():
-            print(f"\n🔍 Analyzing group: {group_key}")
-            print(f"   Documents in group: {len(docs)}")
-            
             if len(docs) == 1:
                 archive_status[docs[0]['id']] = {
                     'is_archived': False,
                     'archive_at': None
                 }
-                print(f"   ✓ Single document: {docs[0]['id']} (CURRENT)")
             else:
                 docs_with_info = []
                 
@@ -164,8 +158,6 @@ class VersionDetector:
                         'updated_at': doc.get('updated_at', ''),
                         'has_revision_info': revision_info['has_revision_info']
                     })
-                    
-                    print(f"   📄 {doc['id']}: year={revision_info['year']}, mentions={revision_info['mentions']}")
                 
                 docs_with_info.sort(
                     key=lambda x: (
@@ -185,9 +177,6 @@ class VersionDetector:
                         'is_archived': is_archived,
                         'archive_at': archive_time if is_archived else None
                     }
-                    
-                    status = "ARCHIVED" if is_archived else "CURRENT"
-                    print(f"   {'📦' if is_archived else '✓'} {status}: {doc['id']}")
         
         return archive_status
     
@@ -206,12 +195,10 @@ class VersionDetector:
             if group_key not in groups:
                 groups[group_key] = []
             groups[group_key].append(doc)
-            
-            print(f"   📋 {doc['id']} → '{detected_type}'")
         
         return groups
     
-    def should_include_archived(self, query: str) -> Dict[str, any]:
+    def should_include_archived(self, query: str) -> Dict:
         """
         Determine if archived documents should be included based on query.
         
@@ -238,7 +225,6 @@ class VersionDetector:
         has_current = any(keyword in query_lower for keyword in current_keywords)
         
         if specific_year:
-            print(f"🔍 Detected specific year in query: {specific_year}")
             return {
                 'include_archived': True,
                 'archived_only': False,
@@ -247,7 +233,6 @@ class VersionDetector:
             }
         
         if has_historical and not has_current:
-            print(f"🔍 User requesting historical data")
             return {
                 'include_archived': True,
                 'archived_only': True,

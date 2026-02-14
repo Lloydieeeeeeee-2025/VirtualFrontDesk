@@ -1,6 +1,5 @@
 import time
 import uvicorn
-import requests
 import threading
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
@@ -13,17 +12,6 @@ from datetime import datetime
 from openai import OpenAI
 import os
 from dotenv import load_dotenv
-
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-class LoginResponse(BaseModel):
-    success: bool
-    message: str
-    error: Optional[str] = None
 
 
 class PromptRequest(BaseModel):
@@ -71,9 +59,7 @@ class VirtualFrontDesk(ChromaDBService):
             'tcp': ['teacher certificate', 'tcp'],
         }
 
-    def store_student_session(self, username: str, session: requests.Session) -> None:
-        """Store authenticated user session."""
-        print(f"Stored session for user: {username}")
+        self.closing_keywords = ['okay', 'ok', 'thanks', 'thank you', 'bye', 'goodbye', 'see you', 'done']
 
     def detect_intent(self, prompt: str) -> str:
         """Detect intent from user prompt using embeddings."""
@@ -95,6 +81,15 @@ class VirtualFrontDesk(ChromaDBService):
             print(f"Error detecting intent: {e}")
             return "general"
 
+    def _is_initial_conversation(self, history: List[dict]) -> bool:
+        """Check if this is the initial conversation (first message)."""
+        return len(history) == 0
+
+    def _is_closing_message(self, prompt: str) -> bool:
+        """Check if user message contains closing keywords."""
+        prompt_lower = prompt.lower().strip()
+        return any(keyword in prompt_lower for keyword in self.closing_keywords)
+
     def _extract_program_from_query(self, prompt: str) -> Optional[str]:
         """Extract program identifier from user query."""
         prompt_lower = prompt.lower()
@@ -102,37 +97,38 @@ class VirtualFrontDesk(ChromaDBService):
         for program_id, keywords in self.program_keywords.items():
             for keyword in keywords:
                 if keyword in prompt_lower:
-                    print(f"📌 Detected program context: {program_id}")
                     return program_id
         
         return None
 
-    def _create_system_prompt_strict(self, context: str, history: List[dict] = None) -> str:
-        """Create STRICT system prompt for GPT-4o."""
-        if history is None:
-            history = []
-
+    def _get_greeting(self) -> str:
+        """Get appropriate greeting based on current time in Manila."""
         ph_time = datetime.now(pytz.timezone("Asia/Manila"))
         hour = ph_time.hour
         if 5 <= hour < 12:
-            greeting = "Good morning"
+            return "Good morning"
         elif 12 <= hour < 18:
-            greeting = "Good afternoon"
+            return "Good afternoon"
         else:
-            greeting = "Good evening"
+            return "Good evening"
+
+    def _create_system_prompt_strict(self, context: str, history: List[dict], is_initial: bool) -> str:
+        """Create STRICT system prompt for GPT-4o."""
+        greeting_text = ""
+        if is_initial:
+            greeting = self._get_greeting()
+            greeting_text = f"{greeting}! I'm here to help with your questions about enrollment, programs, policies, and services at The Lewis College.\n\n"
 
         return f"""You are TLC ChatMate, the official virtual front desk of The Lewis College.
 
-📌 PURPOSE: Provide immediate, accurate academic and administrative assistance using only verified college documents.
+PURPOSE: Provide immediate, accurate academic and administrative assistance using only verified college documents.
 
-{greeting}! I'm here to help with your questions about enrollment, programs, policies, and services at The Lewis College.
-
-CRITICAL INSTRUCTIONS - MUST FOLLOW:
+{greeting_text}CRITICAL INSTRUCTIONS - MUST FOLLOW:
 1. Answer ONLY using the provided database information below.
 2. Do NOT use general knowledge, assumptions, or external facts.
 3. If exact info isn't in the database, say: "I'm sorry, but I don't have information about [topic] in our current records."
-4. For greetings → respond warmly with "{greeting}!" once, then assist.
-5. For farewells → reply politely and end conversation.
+4. For greetings → respond warmly once only in the initial message.
+5. For farewells → reply politely with a closing message and end conversation.
 6. If user uses disruptive/inappropriate language:
    - Stay calm, neutral, and professional.
    - Do NOT react emotionally.
@@ -178,7 +174,6 @@ Conversation history (last few turns for context):
         
         last_student_prompt = last_student_messages[-1]["content"]
         if self.is_follow_up_question(prompt, last_student_prompt):
-            print(f"Detected follow-up question")
             return f"{last_student_prompt} {prompt}"
         
         return prompt
@@ -188,18 +183,24 @@ Conversation history (last few turns for context):
         prompt = request.prompt
         conversation_session = request.conversationSession
 
-        print(f"\n{'='*60}")
-        print(f"[SESSION] {conversation_session}")
-        print(f"[USER] {prompt}")
-
         intent = self.detect_intent(prompt)
-        print(f"[INTENT] {intent}")
 
         if not self.session_manager.session_exists(conversation_session):
             self.session_manager.create_session(conversation_session, request.username)
 
         history = self.session_manager.get_session_history(conversation_session)
-        print(f"[HISTORY] Retrieved {len(history)} messages")
+        is_initial = self._is_initial_conversation(history)
+
+        # Handle closing message
+        if self._is_closing_message(prompt):
+            closing_response = "Thank you for reaching out! Is there anything else I can help you with today?"
+            self._update_conversation_history(conversation_session, history, prompt, closing_response)
+            return PromptResponse(
+                success=True,
+                response=closing_response,
+                requires_auth=False,
+                intent=intent
+            )
 
         main_topic = self.extract_main_topic(prompt, history)
         conversational_query = self.build_conversational_query(history, main_topic)
@@ -209,15 +210,12 @@ Conversation history (last few turns for context):
         # Build where filter to only search current (non-archived) documents
         where_filter = {"is_archived": False}
         if program_id:
-            # Combine program filter with archive filter
             where_filter = {
                 "$and": [
                     {"is_archived": False},
                     {"program_id": program_id}
                 ]
             }
-        
-        print(f"[QUERY FILTER] Searching only current documents (is_archived=False)")
 
         try:
             collection = self.get_collection()
@@ -226,22 +224,13 @@ Conversation history (last few turns for context):
                 n_results=10,
                 where=where_filter
             )
-            
-            num_results = len(results['documents'][0]) if results['documents'] else 0
-            print(f"[CHROMADB] Retrieved {num_results} documents")
-            
-            if results['metadatas'] and results['metadatas'][0]:
-                print(f"[METADATA] Sample archive status: is_archived={results['metadatas'][0][0].get('is_archived', 'N/A')}")
         except Exception as e:
-            print(f"[ERROR] ChromaDB query failed: {e}")
+            print(f"ChromaDB query failed: {e}")
             results = {'documents': [[]], 'metadatas': [[]]}
 
         context = self._extract_context_from_results(results)
-        context_length = len(context.strip()) if context else 0
-        print(f"[CONTEXT] Retrieved {context_length} characters")
 
         if not context.strip():
-            print(f"[NO CONTEXT] No matching documents found")
             ai_response = "I'm sorry, but I don't have information about that topic in our current records."
             self._update_conversation_history(conversation_session, history, prompt, ai_response)
             
@@ -252,10 +241,8 @@ Conversation history (last few turns for context):
                 intent=intent
             )
 
-        system_prompt = self._create_system_prompt_strict(context, history)
+        system_prompt = self._create_system_prompt_strict(context, history, is_initial)
         messages = self._prepare_messages(system_prompt, history, prompt)
-
-        print(f"[GPT INPUT] {len(messages)} messages")
 
         response = self.openai_client.chat.completions.create(
             model="gpt-4o",
@@ -266,10 +253,8 @@ Conversation history (last few turns for context):
         )
 
         ai_response = response.choices[0].message.content
-        print(f"[AI RESPONSE] {ai_response[:150]}...")
 
         self._update_conversation_history(conversation_session, history, prompt, ai_response)
-        print(f"[HISTORY UPDATED] {len(history) + 2} messages in session")
 
         return PromptResponse(
             success=True,
@@ -304,7 +289,6 @@ Conversation history (last few turns for context):
         history.append({"role": "assistant", "content": ai_response})
         trimmed = history[-8:]
         self.session_manager.update_history(session_id, trimmed)
-        print(f"[HISTORY] Saved {len(trimmed)} messages")
 
     def get_all_sessions(self) -> List[str]:
         """Get all active session IDs."""
@@ -320,21 +304,10 @@ knowledge_repo = KnowledgeRepository()
 async def startup_event():
     """Run initial sync on startup."""
     def initial_sync():
-        print("Starting initial database sync...")
         knowledge_repo.sync_data_to_chromadb()
     
     sync_thread = threading.Thread(target=initial_sync, daemon=True)
     sync_thread.start()
-
-
-@app.post("/student/login", response_model=LoginResponse)
-async def student_login(request: LoginRequest):
-    try:
-        print(f"Attempting login for student: {request.username}")
-        return LoginResponse(success=True, message="Login successful")
-    except Exception as e:
-        print(f"Login error: {str(e)}")
-        return LoginResponse(success=False, message="Login error", error=str(e))
 
 
 @app.post("/VirtualFrontDesk", response_model=PromptResponse)

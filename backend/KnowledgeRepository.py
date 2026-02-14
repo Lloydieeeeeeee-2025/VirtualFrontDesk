@@ -29,10 +29,9 @@ class KnowledgeRepository(ChromaDBService):
         self.web_scraper = WebScraper()
         self.version_detector = VersionDetector()
 
-        # Progress tracking
         self.progress = {
-            "step": None,  # Analyzing, Chunking, Scraping, Completed
-            "status": "idle"  # idle, running, completed, error
+            "step": None,
+            "status": "idle"
         }
 
     def set_progress(self, step: str, status: str = "running"):
@@ -49,28 +48,23 @@ class KnowledgeRepository(ChromaDBService):
         """Delete ALL orphaned collections and keep only the current one."""
         try:
             all_collections = self.client.list_collections()
-            print(f"\n🔍 Found {len(all_collections)} total collections in ChromaDB")
             
             for collection in all_collections:
                 col_name = collection.name
                 if col_name != self.collection_name:
-                    print(f"🗑️ Removing orphaned collection: {col_name}")
                     try:
                         self.client.delete_collection(name=col_name)
-                        print(f"   ✓ Deleted: {col_name}")
                     except Exception:
                         pass
-            
-            print(f"✓ Cleanup complete - only '{self.collection_name}' will remain")
         except Exception as e:
-            print(f"✗ Error during cleanup: {e}")
+            print(f"Error during cleanup: {e}")
 
     def get_db_connection(self):
         """Get database connection."""
         try:
             return tlcchatmate()
         except Exception as e:
-            print(f"✗ Database connection failed: {e}")
+            print(f"Database connection failed: {e}")
             return None
 
     def decode_pdf_bytes(self, pdf_data):
@@ -155,7 +149,7 @@ class KnowledgeRepository(ChromaDBService):
             conn.execute("SELECT handbook_id, handbook_document, handbook_name, updated_at FROM Handbook "
                         "WHERE archive_at IS NULL")
             handbooks = conn.fetchall()
-            print(f"📋 Found {len(handbooks)} non-archived handbooks to process")
+            print(f"Found {len(handbooks)} non-archived handbooks to process")
             
             for handbook_id, pdf_data, handbook_name, updated_at in handbooks:
                 pdf_bytes = self.decode_pdf_bytes(pdf_data)
@@ -182,9 +176,9 @@ class KnowledgeRepository(ChromaDBService):
                         'updated_at': updated_at
                     })
                 except Exception as e:
-                    print(f"✗ Error processing handbook {handbook_id}: {e}")
+                    print(f"Error processing handbook {handbook_id}: {e}")
         except Exception as e:
-            print(f"✗ Error fetching handbook data: {e}")
+            print(f"Error fetching handbook data: {e}")
 
     def _process_course_data(self, conn, documents_data: List[dict]):
         """Extract and store course documents."""
@@ -192,7 +186,7 @@ class KnowledgeRepository(ChromaDBService):
             conn.execute("SELECT course_id, course_document, document_name, updated_at FROM Course "
                         "WHERE archive_at IS NULL")
             courses = conn.fetchall()
-            print(f"📋 Found {len(courses)} non-archived courses to process")
+            print(f"Found {len(courses)} non-archived courses to process")
             
             for course_id, pdf_data, document_name, updated_at in courses:
                 pdf_bytes = self.decode_pdf_bytes(pdf_data)
@@ -219,9 +213,9 @@ class KnowledgeRepository(ChromaDBService):
                         'updated_at': updated_at
                     })
                 except Exception as e:
-                    print(f"✗ Error processing course {course_id}: {e}")
+                    print(f"Error processing course {course_id}: {e}")
         except Exception as e:
-            print(f"✗ Error fetching course data: {e}")
+            print(f"Error fetching course data: {e}")
 
     def _process_faq_data(self, conn, documents_data: List[dict]):
         """Extract and store FAQ documents."""
@@ -241,12 +235,12 @@ class KnowledgeRepository(ChromaDBService):
                     'updated_at': updated_at
                 })
         except Exception as e:
-            print(f"✗ Error fetching FAQ data: {e}")
+            print(f"Error fetching FAQ data: {e}")
 
     def _chunk_and_store_documents(self, documents_data: List[dict], archive_status: Dict,
                                     documents: List[str], metadata: List[dict], ids: List[str]):
         """Chunk documents and prepare for ChromaDB storage."""
-        print(f"\n📊 Chunking {len(documents_data)} documents...")
+        print(f"Chunking {len(documents_data)} documents...")
         
         for doc_data in documents_data:
             doc_id = doc_data['id']
@@ -277,7 +271,7 @@ class KnowledgeRepository(ChromaDBService):
                     "program_id": program_id
                 })
         
-        print(f"\n📦 Chunking complete. Total chunks: {len(ids)}")
+        print(f"Chunking complete. Total chunks: {len(ids)}")
 
     def _update_archive_status_in_db(self, db, archive_status: Dict):
         """Update archive status in database for archived documents."""
@@ -301,10 +295,10 @@ class KnowledgeRepository(ChromaDBService):
             
             if updated_count > 0:
                 db.commit()
-                print(f"✓ {updated_count} documents archived in database")
+                print(f"{updated_count} documents archived in database")
                 
         except Exception as e:
-            print(f"✗ Error updating archive status: {e}")
+            print(f"Error updating archive status: {e}")
             db.rollback()
 
     def collect_all_documents(self, conn) -> Tuple[List[str], List[dict], List[str], Dict]:
@@ -318,10 +312,10 @@ class KnowledgeRepository(ChromaDBService):
             self._process_course_data(conn, documents_data)
             self._process_faq_data(conn, documents_data)
         except Exception as e:
-            print(f"✗ Error collecting documents: {e}")
+            print(f"Error collecting documents: {e}")
             raise
 
-        print("\n🔍 Analyzing document versions...")
+        print("Analyzing document versions...")
         archive_status = self.version_detector.determine_archive_status(documents_data)
 
         self.set_progress("Chunking")
@@ -329,12 +323,12 @@ class KnowledgeRepository(ChromaDBService):
 
         try:
             self.set_progress("Scraping")
-            print("🌐 Collecting website data...")
+            print("Collecting website data...")
             scraped_data = self.web_scraper.scrape_all_websites(self)
             if scraped_data:
                 self.web_scraper.process_scraped_content(scraped_data, documents, metadata, ids, self.text_splitter)
         except Exception as e:
-            print(f"✗ Error processing website data: {e}")
+            print(f"Error processing website data: {e}")
 
         return documents, metadata, ids, archive_status
 
@@ -351,7 +345,6 @@ class KnowledgeRepository(ChromaDBService):
             
             self._cleanup_all_collections()
             
-            # collect_all_documents handles Analyzing, Chunking, Scraping progress updates
             documents, metadata, ids, archive_status = self.collect_all_documents(conn)
 
             if not documents:

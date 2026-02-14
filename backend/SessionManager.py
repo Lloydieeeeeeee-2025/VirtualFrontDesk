@@ -23,7 +23,7 @@ class SessionManager:
     def create_session(self, session_id: str = None, user_id: str = None) -> str:
         """
         Create a new isolated session.
-        IMPORTANT: Each session_id must be UNIQUE per device/browser
+        Each session_id must be UNIQUE per device/browser.
         
         Args:
             session_id: Optional custom session ID, generates UUID if not provided
@@ -36,9 +36,6 @@ class SessionManager:
             session_id = f"session_{uuid.uuid4()}"
 
         with self._lock:
-            if session_id in self._sessions:
-                print(f"⚠️ Recreating session: {session_id}")
-            
             self._sessions[session_id] = {
                 'history': [],
                 'user_id': user_id,
@@ -46,7 +43,6 @@ class SessionManager:
                 'last_accessed': datetime.now(),
                 'metadata': {}
             }
-            print(f"✓ Session created: {session_id} (User: {user_id or 'anonymous'})")
             return session_id
 
     def get_session_history(self, session_id: str) -> List[dict]:
@@ -62,7 +58,6 @@ class SessionManager:
         """
         with self._lock:
             if session_id not in self._sessions:
-                print(f"⚠️ Session not found: {session_id}")
                 return []
 
             self._sessions[session_id]['last_accessed'] = datetime.now()
@@ -82,7 +77,6 @@ class SessionManager:
         """
         with self._lock:
             if session_id not in self._sessions:
-                print(f"⚠️ Cannot add to history: session not found {session_id}")
                 return False
 
             self._sessions[session_id]['history'].append({
@@ -99,7 +93,7 @@ class SessionManager:
     def update_history(self, session_id: str, history: List[dict]) -> bool:
         """
         Bulk update conversation history for a session.
-        CRITICAL: This replaces the entire history
+        This replaces the entire history.
         
         Args:
             session_id: The session ID
@@ -110,7 +104,6 @@ class SessionManager:
         """
         with self._lock:
             if session_id not in self._sessions:
-                print(f"⚠️ Cannot update history: session not found {session_id}")
                 return False
 
             trimmed_history = history[-self.max_messages:] if history else []
@@ -146,7 +139,6 @@ class SessionManager:
         with self._lock:
             if session_id in self._sessions:
                 del self._sessions[session_id]
-                print(f"✓ Session deleted: {session_id}")
                 return True
             return False
 
@@ -171,8 +163,5 @@ class SessionManager:
 
             for session_id in expired:
                 del self._sessions[session_id]
-
-            if expired:
-                print(f"🗑️ Cleaned up {len(expired)} expired sessions")
 
             return len(expired)

@@ -18,7 +18,7 @@ class WebScraper:
         """Fetch URLs from the database URL table."""
         db = repo.get_db_connection()
         if not db:
-            print("✗ Failed to connect to database to fetch URLs")
+            print("Failed to connect to database to fetch URLs")
             return []
 
         try:
@@ -33,10 +33,10 @@ class WebScraper:
                 for row in conn.fetchall()
             ]
             db.close()
-            print(f"✓ Fetched {len(urls)} URLs from database")
+            print(f"Fetched {len(urls)} URLs from database")
             return urls
         except Exception as e:
-            print(f"✗ Error fetching URLs from database: {e}")
+            print(f"Error fetching URLs from database: {e}")
             if db:
                 db.close()
             return []
@@ -50,7 +50,7 @@ class WebScraper:
 
             content_type = response.headers.get('Content-Type', '')
             if 'text/html' not in content_type:
-                print(f"  ⚠️ {url} is not HTML content, skipping...")
+                print(f"  {url} is not HTML content, skipping...")
                 return None
 
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -68,7 +68,7 @@ class WebScraper:
             content = '\n'.join(line.strip() for line in content.split('\n') if line.strip())
 
             if not content:
-                print(f"  ⚠️ No content extracted from {url}")
+                print(f"  No content extracted from {url}")
                 return None
 
             full_content = f"URL: {url}\n"
@@ -82,19 +82,19 @@ class WebScraper:
             }
 
         except requests.RequestException as e:
-            print(f"  ✗ Failed to scrape {url}: {e}")
+            print(f"  Failed to scrape {url}: {e}")
             return None
         except Exception as e:
-            print(f"  ✗ Error processing {url}: {e}")
+            print(f"  Error processing {url}: {e}")
             return None
 
     def scrape_all_websites(self, repo) -> List[Dict]:
         """Scrape content from all URLs stored in database."""
-        print("🌐 Starting website scraping...")
+        print("Starting website scraping...")
         url_data = self.get_urls_from_database(repo)
 
         if not url_data:
-            print("⚠️ No URLs found in database to scrape")
+            print("No URLs found in database to scrape")
             return []
 
         all_content = []
@@ -113,7 +113,7 @@ class WebScraper:
                 })
             time.sleep(2)
 
-        print(f"✓ Scraped {len(all_content)} out of {len(url_data)} URLs")
+        print(f"Scraped {len(all_content)} out of {len(url_data)} URLs")
         return all_content
 
     def process_scraped_content(self, scraped_data: List[Dict], documents: List[str],
@@ -145,4 +145,4 @@ class WebScraper:
                     "document_version": "current"
                 })
 
-        print(f"✓ Processed {len([id for id in ids if id.startswith('url_')])} URL chunks")
+        print(f"Processed {len([id for id in ids if id.startswith('url_')])} URL chunks")

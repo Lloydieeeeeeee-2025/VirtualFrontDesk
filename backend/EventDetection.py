@@ -1,5 +1,4 @@
 from typing import Set, Dict, List
-from datetime import datetime
 
 
 class EventDetection:
@@ -46,11 +45,10 @@ class EventDetection:
                     current_ids.add(f"faq_{faq_id}")
 
             db.close()
-            print(f"✓ Collected {len(current_ids)} current document IDs from database")
             return current_ids
 
         except Exception as e:
-            print(f"✗ Error getting current document IDs: {e}")
+            print(f"Error getting current document IDs: {e}")
             if db:
                 db.close()
             return set()
@@ -88,7 +86,7 @@ class EventDetection:
                 else:
                     changes['updated'].append(formatted_id)
 
-            # Check for deletions
+            # Check for deletions (including archived documents)
             current_ids = self.get_current_document_ids()
             deleted = self.last_processed_ids - current_ids
             changes['deleted'] = list(deleted)
@@ -97,15 +95,15 @@ class EventDetection:
 
             total_changes = len(changes['inserted']) + len(changes['updated']) + len(changes['deleted'])
             if total_changes > 0:
-                print(f"📊 Changes detected: {len(changes['inserted'])} inserted, "
+                print(f"Changes detected: {len(changes['inserted'])} inserted, "
                       f"{len(changes['updated'])} updated, {len(changes['deleted'])} deleted")
                 return changes
             
-            print("✓ No changes detected")
+            print("No changes detected")
             return changes
 
         except Exception as e:
-            print(f"✗ Error detecting changes: {e}")
+            print(f"Error detecting changes: {e}")
             return changes
 
     def check_for_updates(self, db, last_sync_time: str) -> bool:
@@ -134,10 +132,10 @@ class EventDetection:
             has_updates = update_result[0] > 0 if update_result else False
 
             if has_updates:
-                print(f"📝 Updates detected: {update_result[0]} records modified since {last_sync_time}")
+                print(f"Updates detected: {update_result[0]} records modified since {last_sync_time}")
                 return True
 
-            # Check for deletions
+            # Check for deletions (including archived documents)
             current_doc_ids = self.get_current_document_ids()
             collection = self.repo.get_collection()
             existing_data = collection.get()
@@ -154,14 +152,14 @@ class EventDetection:
             if chromadb_base_ids:
                 deleted_ids = chromadb_base_ids - current_doc_ids
                 if deleted_ids:
-                    print(f"🗑️ Deletions detected: {len(deleted_ids)} documents removed")
+                    print(f"Deletions detected: {len(deleted_ids)} documents removed")
                     return True
 
-            print(f"✓ No changes detected (Last sync: {last_sync_time})")
+            print(f"No changes detected (Last sync: {last_sync_time})")
             return False
 
         except Exception as e:
-            print(f"✗ Error checking for updates: {e}")
+            print(f"Error checking for updates: {e}")
             return True
 
     @staticmethod

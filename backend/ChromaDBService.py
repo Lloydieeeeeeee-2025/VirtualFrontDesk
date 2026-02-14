@@ -24,7 +24,6 @@ class ChromaDBService:
     def reinitialize_client(self) -> None:
         """Force reinitialize the ChromaDB client for clean state."""
         self._initialize_client()
-        print("🔄 ChromaDB client reinitialized")
         
     def get_collection(self, force_refresh=False):
         """Get collection with optional force refresh to see latest data."""
