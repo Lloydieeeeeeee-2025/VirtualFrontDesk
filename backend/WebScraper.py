@@ -8,6 +8,9 @@ from datetime import datetime
 class WebScraper:
     """Handles scraping and processing of website content."""
 
+    # HTML elements whose content is purely presentational and never informational.
+    _DISCARD_TAGS = ['script', 'style', 'nav', 'header', 'iframe', 'svg', 'form']
+
     def __init__(self):
         self.timeout = 15
         self.headers = {
@@ -25,15 +28,10 @@ class WebScraper:
             conn = db.cursor()
             conn.execute("SELECT link_url, description, updated_at FROM url")
             urls = [
-                {
-                    "url": row[0],
-                    "description": row[1],
-                    "updated_at": row[2]
-                }
+                {"url": row[0], "description": row[1], "updated_at": row[2]}
                 for row in conn.fetchall()
             ]
             db.close()
-            print(f"Fetched {len(urls)} URLs from database")
             return urls
         except Exception as e:
             print(f"Error fetching URLs from database: {e}")
@@ -41,108 +39,160 @@ class WebScraper:
                 db.close()
             return []
 
+    def _extract_footer_text(self, soup: BeautifulSoup) -> str:
+        """
+        Extract meaningful text from the page footer, including link text
+        and href values (emails, social media URLs, map links) that carry
+        contact/location information.
+        Returns an empty string when no footer is present.
+        """
+        footer = soup.find('footer')
+        if not footer:
+            return ""
+
+        lines = []
+
+        # Walk every element inside the footer in document order.
+        for element in footer.descendants:
+            # Only process tag nodes; raw NavigableStrings are handled via parent tags.
+            if not hasattr(element, 'name'):
+                continue
+
+            if element.name == 'a':
+                link_text = element.get_text(strip=True)
+                href = element.get('href', '').strip()
+
+                # Normalise mailto: links so the raw email address is stored.
+                if href.startswith('mailto:'):
+                    email = href[len('mailto:'):]
+                    entry = f"{link_text} {email}".strip() if link_text else email
+                    lines.append(entry)
+                # Keep map/social/external URLs alongside their visible label.
+                elif href and href.startswith('http'):
+                    entry = f"{link_text} ({href})".strip() if link_text else href
+                    lines.append(entry)
+                elif link_text:
+                    lines.append(link_text)
+
+            elif element.name in ('p', 'span', 'li', 'h1', 'h2', 'h3',
+                                  'h4', 'h5', 'h6', 'strong', 'em', 'td', 'th'):
+                # Capture direct text nodes of this element only (not its children),
+                # so we don't duplicate text already captured from child <a> tags.
+                direct_text = ''.join(
+                    str(child) for child in element.children
+                    if not hasattr(child, 'name')  # NavigableString only
+                ).strip()
+                if direct_text:
+                    lines.append(direct_text)
+
+        # De-duplicate while preserving order, then drop blank entries.
+        seen = set()
+        unique_lines = []
+        for line in lines:
+            normalised = line.strip()
+            if normalised and normalised not in seen:
+                seen.add(normalised)
+                unique_lines.append(normalised)
+
+        return '\n'.join(unique_lines)
+
     def scrape_website_content(self, url: str, description: str) -> Dict:
         """Scrape content from a single URL."""
         try:
-            print(f"  Scraping: {url}")
             response = requests.get(url, headers=self.headers, timeout=self.timeout)
             response.raise_for_status()
 
-            content_type = response.headers.get('Content-Type', '')
-            if 'text/html' not in content_type:
-                print(f"  {url} is not HTML content, skipping...")
+            if 'text/html' not in response.headers.get('Content-Type', ''):
                 return None
 
             soup = BeautifulSoup(response.content, 'html.parser')
-            for element in soup(['script', 'style', 'nav', 'header', 'footer', 'iframe', 'svg', 'form']):
+
+            # Capture footer text before discarding the tag.
+            footer_text = self._extract_footer_text(soup)
+
+            for element in soup(self._DISCARD_TAGS + ['footer']):
                 element.decompose()
 
-            main_content = soup.find('main') or soup.find('article') or \
-                          soup.find('div', class_=lambda x: x and ('content' in x.lower() or 'main' in x.lower()))
+            main_content = (
+                soup.find('main')
+                or soup.find('article')
+                or soup.find('div', class_=lambda x: x and ('content' in x.lower() or 'main' in x.lower()))
+            )
 
-            if main_content:
-                content = main_content.get_text(separator='\n', strip=True)
-            else:
-                content = soup.get_text(separator='\n', strip=True)
+            body_text = (main_content or soup).get_text(separator='\n', strip=True)
+            body_lines = [line.strip() for line in body_text.split('\n') if line.strip()]
+            body_text = '\n'.join(body_lines)
 
-            content = '\n'.join(line.strip() for line in content.split('\n') if line.strip())
+            # Append footer text as a clearly labelled section so it is stored
+            # in the vector database as its own retrievable content.
+            parts = [f"URL: {url}"]
+            if description:
+                parts.append(f"Description: {description}\n")
+            parts.append(body_text)
+            if footer_text:
+                parts.append(f"\n--- Footer Information ---\n{footer_text}")
 
-            if not content:
-                print(f"  No content extracted from {url}")
+            full_content = '\n'.join(parts).strip()
+            if not full_content:
                 return None
 
-            full_content = f"URL: {url}\n"
-            if description:
-                full_content += f"Description: {description}\n\n"
-            full_content += content
-
-            return {
-                'url': url,
-                'content': full_content.strip()
-            }
+            return {'url': url, 'content': full_content}
 
         except requests.RequestException as e:
-            print(f"  Failed to scrape {url}: {e}")
+            print(f"Failed to scrape {url}: {e}")
             return None
         except Exception as e:
-            print(f"  Error processing {url}: {e}")
+            print(f"Error processing {url}: {e}")
             return None
 
     def scrape_all_websites(self, repo) -> List[Dict]:
         """Scrape content from all URLs stored in database."""
-        print("Starting website scraping...")
         url_data = self.get_urls_from_database(repo)
-
         if not url_data:
-            print("No URLs found in database to scrape")
             return []
 
         all_content = []
         for item in url_data:
-            url = item['url']
-            description = item['description']
-            result = self.scrape_website_content(url, description)
-            
+            result = self.scrape_website_content(item['url'], item['description'])
             if result:
                 all_content.append({
-                    'url': url,
-                    'description': description,
+                    'url': item['url'],
+                    'description': item['description'],
                     'updated_at': item['updated_at'],
                     'content': result['content'],
-                    'scraped_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    'scraped_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 })
             time.sleep(2)
 
-        print(f"Scraped {len(all_content)} out of {len(url_data)} URLs")
         return all_content
 
     def process_scraped_content(self, scraped_data: List[Dict], documents: List[str],
-                               metadata: List[Dict], ids: List[str], text_splitter) -> None:
+                                metadata: List[Dict], ids: List[str], text_splitter) -> None:
         """Process scraped website content into chunks."""
         for item in scraped_data:
             url = item['url']
             content = item['content']
-            
             if not content.strip():
                 continue
 
-            chunks = text_splitter.split_text(content)
-            url_id = url.replace('https://', '').replace('http://', '').replace('/', '_').replace('.', '_')
-            url_id = url_id.rstrip('_')
+            url_id = (
+                url.replace('https://', '').replace('http://', '')
+                   .replace('/', '_').replace('.', '_').rstrip('_')
+            )
 
-            for idx, chunk in enumerate(chunks):
+            for idx, chunk in enumerate(text_splitter.split_text(content)):
                 documents.append(chunk)
-                chunk_id = f"url_{url_id}_chunk_{idx}"
-                ids.append(chunk_id)
+                ids.append(f"url_{url_id}_chunk_{idx}")
                 metadata.append({
                     "source_url": url,
                     "data_type": "url",
                     "description": item.get('description', ''),
                     "scraped_at": item['scraped_at'],
-                    "updated_at": item['updated_at'].strftime('%Y-%m-%d %H:%M:%S') if item['updated_at'] else '',
+                    "updated_at": (
+                        item['updated_at'].strftime('%Y-%m-%d %H:%M:%S')
+                        if item['updated_at'] else ''
+                    ),
                     "chunk_index": idx,
                     "is_archived": False,
-                    "document_version": "current"
+                    "document_version": "current",
                 })
-
-        print(f"Processed {len([id for id in ids if id.startswith('url_')])} URL chunks")
