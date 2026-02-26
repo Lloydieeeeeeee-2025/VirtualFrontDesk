@@ -31,7 +31,31 @@ class VirtualFrontDesk(ChromaDBService):
     """Virtual Front Desk for The Lewis College student inquiries."""
 
     RELEVANCE_THRESHOLD = 0.30
+    TRANSLATED_RELEVANCE_THRESHOLD = 0.25  # Slightly permissive for machine-translated queries
     RETRIEVAL_TOP_K = 15
+
+    # ---------------------------------------------------------------------------
+    # Language detection keyword sets
+    # ---------------------------------------------------------------------------
+    _TAGALOG_MARKERS = {
+        # Pronouns
+        "ako", "ikaw", "siya", "kami", "tayo", "kayo", "sila",
+        "ko", "mo", "niya", "namin", "natin", "ninyo", "nila",
+        "akin", "iyo", "kanya", "amin", "atin", "inyo", "kanila",
+        # Common particles / conjunctions
+        "ang", "ng", "sa", "na", "at", "ay", "ni", "kay", "para",
+        "kung", "pero", "kaya", "dahil", "kapag", "nang",
+        # Common Tagalog words
+        "ano", "sino", "saan", "kailan", "bakit", "paano",
+        "ito", "iyon", "dito", "doon", "nito", "noon",
+        "mga", "rin", "din", "lang", "po", "ho",
+        "hindi", "oo", "wala", "mayroon", "meron",
+        "gusto", "puwede", "pwede", "kailangan",
+        "magkano", "ilang", "gaano",
+        "salamat", "kumusta", "magandang", "maayos",
+        "tanong", "sagot", "tulong", "impormasyon",
+        "enrolla", "enrolled", "pasok", "klase",
+    }
 
     def __init__(self, knowledge_repo: KnowledgeRepository):
         load_dotenv()
@@ -64,36 +88,123 @@ class VirtualFrontDesk(ChromaDBService):
             "tcp":          ["teacher certificate", "tcp"],
         }
 
-        self.closing_keywords = {"bye", "goodbye", "see you", "good bye"}
+        # English and Tagalog closing / soft-closing keywords
+        self.closing_keywords = {
+            # English
+            "bye", "goodbye", "see you", "good bye",
+            # Tagalog
+            "paalam", "hanggang sa muli", "babay",
+        }
         self.soft_closing_phrases = {
+            # English
             "okay thanks", "ok thanks", "thank you", "thanks",
             "okay", "ok", "done", "alright",
+            # Tagalog
+            "salamat", "maraming salamat", "sige", "sige na",
+            "ayos na", "tapos na", "okay na", "ok na", "ok lang",
         }
 
         self.confirmation_phrases = {
+            # English
             "is that correct", "is that right", "are you sure", "are you certain",
             "is that accurate", "is that true", "are you confident", "is that confirmed",
             "really", "are you sure about that", "is that so", "can you confirm",
             "you sure", "is this correct", "is this right", "correct?", "right?",
+            # Tagalog
+            "tama ba", "tama ba iyon", "tama ba iyan", "sigurado ka ba",
+            "sigurado ba", "totoo ba", "totoo ba iyon", "totoo ba iyan",
+            "kumpirmado ba", "pwede mo bang kumpirmahin", "talaga ba",
+            "talaga", "ganon ba", "ganoon ba", "tama ba yun", "tama ba yan",
         }
 
         self._empty_result = {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+
+    # -------------------------------------------------------------------------
+    # Language Detection
+    # -------------------------------------------------------------------------
+
+    def _detect_language(self, prompt: str) -> str:
+        """
+        Detect whether the prompt is primarily English, Tagalog, or mixed.
+        Returns: 'english', 'tagalog', or 'mixed'
+        """
+        tokens = set(prompt.lower().split())
+        tagalog_hits = tokens & self._TAGALOG_MARKERS
+        tagalog_ratio = len(tagalog_hits) / max(len(tokens), 1)
+
+        if tagalog_ratio >= 0.4:
+            return "tagalog"
+        if tagalog_ratio >= 0.15:
+            return "mixed"
+        return "english"
+
+    def _language_instruction(self, prompt: str) -> str:
+        """
+        Return the language-mirroring instruction to embed in the system prompt.
+        The model must use the same retrieval-grounded logic regardless of language.
+        """
+        lang = self._detect_language(prompt)
+        if lang == "tagalog":
+            return (
+                "LANGUAGE: The student is writing in Tagalog. "
+                "Respond entirely in Tagalog. "
+                "Apply every response rule identically — use only the DATABASE INFORMATION "
+                "provided, do not guess or add information not found in the database, "
+                "and keep the same accuracy and professionalism as you would in English."
+            )
+        if lang == "mixed":
+            return (
+                "LANGUAGE: The student is mixing English and Tagalog. "
+                "Mirror the student's language mix naturally (Taglish). "
+                "Apply every response rule identically — use only the DATABASE INFORMATION "
+                "provided, do not guess or add information not found in the database."
+            )
+        return (
+            "LANGUAGE: The student is writing in English. Respond in English."
+        )
+
+    def _translate_to_english(self, prompt: str) -> str:
+        """
+        Translate a Tagalog or mixed-language prompt into English for use as
+        the ChromaDB retrieval query only. The original prompt is always used
+        for the final LLM response so the student's language is preserved.
+        Returns the original prompt unchanged for English input.
+        """
+        if self._detect_language(prompt) == "english":
+            return prompt
+        try:
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a translator. Translate the following student question "
+                            "into clear, natural English. Output ONLY the translated text — "
+                            "no explanations, no quotation marks, no extra punctuation."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=200,
+            )
+            translated = response.choices[0].message.content.strip()
+            return translated if translated else prompt
+        except Exception:
+            return prompt
 
     # -------------------------------------------------------------------------
     # Sync Readiness
     # -------------------------------------------------------------------------
 
     def _is_sync_ready(self) -> bool:
-        """
-        Return True only when the background sync has completed and the
-        collection contains at least one non-metadata document.
-        """
+        """Return True only when sync has completed and the collection has data."""
         if self.knowledge_repo.progress.get("status") != "completed":
             return False
         try:
             collection = self.get_collection()
-            count = collection.count()
-            return count > 1
+            return collection.count() > 1
         except Exception:
             return False
 
@@ -161,8 +272,7 @@ class VirtualFrontDesk(ChromaDBService):
     def build_conversational_query(self, history: List[dict], current_prompt: str) -> str:
         """
         Build a retrieval query enriched with recent user context.
-        For the very first question (no history) the prompt is used as-is so
-        the embedding is focused and not diluted by empty context.
+        For the very first question (no history) the prompt is used as-is.
         Assistant messages are excluded to avoid diluting the embedding.
         """
         recent_user_messages = [
@@ -188,10 +298,11 @@ class VirtualFrontDesk(ChromaDBService):
     # -------------------------------------------------------------------------
 
     def _create_system_prompt(self, context: str, is_initial: bool,
-                              has_archived_content: bool = False) -> str:
+                              prompt: str = "", has_archived_content: bool = False) -> str:
         """
-        Build the system prompt. History is passed separately via the messages
-        list and must NOT be embedded here to prevent double-injection.
+        Build the system prompt.
+        History is passed separately via the messages list and must NOT be
+        embedded here to prevent double-injection.
         """
         greeting_line = ""
         if is_initial:
@@ -210,6 +321,8 @@ class VirtualFrontDesk(ChromaDBService):
                 "the student to verify current policies with the registrar or the relevant office.\n"
             )
 
+        language_instruction = self._language_instruction(prompt)
+
         return f"""You are TLC ChatMate, the official virtual front desk of The Lewis College.
 
 {greeting_line}YOUR ROLE:
@@ -219,18 +332,21 @@ STRICT RESPONSE RULES — MUST FOLLOW:
 1. Answer ONLY using the DATABASE INFORMATION section below.
 2. If the exact information is not found in DATABASE INFORMATION, respond with:
    "I'm sorry, but I don't have information about [topic] in our current records. You may visit the registrar or contact our office for assistance."
+   (Translate this message to match the student's language when applicable.)
    Do NOT attempt to answer from general knowledge when this situation occurs.
 3. Do NOT guess, invent, assume, or use general knowledge outside of the provided DATABASE INFORMATION.
 4. Do NOT say "Based on my knowledge", "I believe", "I think", or similar hedging phrases.
 5. Do NOT fabricate details such as specific dates, amounts, requirements, or policies that are not explicitly stated in the database.
 6. Keep answers concise — 1 to 3 sentences unless listing requirements, steps, or fees.
 7. Use bullet points ONLY for: enrollment steps, fee breakdowns, checklists, or multi-item lists.
-8. Respond in English, Filipino, or Bicol depending on the student's language. Default to English if uncertain.
-9. If the student uses inappropriate or disruptive language, respond calmly:
-   "Let's keep our conversation respectful and focused on your academic needs."
-10. For greetings — respond warmly but briefly; do not repeat the greeting on follow-up messages.
-11. For farewells — reply with a short, friendly closing message.
-12. Never start your response with "I" as the first word.
+8. {language_instruction}
+9. Supported languages are English and Tagalog ONLY. Do NOT respond in any other language.
+10. If the student uses inappropriate or disruptive language, respond calmly:
+    "Let's keep our conversation respectful and focused on your academic needs."
+    (Translate to match the student's language when applicable.)
+11. For greetings — respond warmly but briefly; do not repeat the greeting on follow-up messages.
+12. For farewells — reply with a short, friendly closing message.
+13. Never start your response with "I" as the first word.
 {archived_note}
 CONVERSATION FLOW:
 - Greeting (only at the start or when appropriate)
@@ -306,12 +422,16 @@ DATABASE INFORMATION (only authoritative source):
             except Exception:
                 return self._empty_result
 
-    def _extract_context_from_results(self, results: dict) -> str:
+    def _extract_context_from_results(self, results: dict,
+                                       threshold: Optional[float] = None) -> str:
         """
         Build a context string from retrieved chunks, filtering out chunks
-        whose cosine similarity falls below RELEVANCE_THRESHOLD.
+        whose cosine similarity falls below the given threshold.
         ChromaDB returns cosine distance in [0, 2]; similarity = 1 - distance/2.
+        Defaults to RELEVANCE_THRESHOLD; pass TRANSLATED_RELEVANCE_THRESHOLD
+        when the query was machine-translated from Tagalog.
         """
+        effective_threshold = threshold if threshold is not None else self.RELEVANCE_THRESHOLD
         docs = results.get("documents", [[]])
         distances = results.get("distances", [[]])
 
@@ -324,15 +444,22 @@ DATABASE INFORMATION (only authoritative source):
                 continue
             if idx < len(dist_list):
                 similarity = 1.0 - dist_list[idx] / 2.0
-                if similarity < self.RELEVANCE_THRESHOLD:
+                if similarity < effective_threshold:
                     continue
             context_parts.append(doc.strip())
 
         return "\n\n".join(context_parts)
 
-    def _retrieve_context(self, retrieval_query: str, prompt: str) -> Tuple[str, bool]:
+    def _retrieve_context(self, retrieval_query: str, prompt: str,
+                          translated_query: str) -> Tuple[str, bool]:
         """
         Retrieve context from ChromaDB with archive-awareness.
+
+        retrieval_query  – conversational query built from history + topic.
+        prompt           – original student prompt (used for archive params / program detection).
+        translated_query – English translation of retrieval_query used for the
+                           actual ChromaDB embedding call when the student wrote
+                           in Tagalog or mixed language.
 
         Strategy:
           - Normal questions      → only current chunks (is_archived=False).
@@ -347,6 +474,12 @@ DATABASE INFORMATION (only authoritative source):
         archived_only = archive_params.get("archived_only", False)
         specific_year = archive_params.get("specific_year")
 
+        is_translated = translated_query != retrieval_query
+        threshold = (
+            self.TRANSLATED_RELEVANCE_THRESHOLD if is_translated else self.RELEVANCE_THRESHOLD
+        )
+        query_for_chroma = translated_query
+
         def _archived_filter() -> dict:
             if program_id:
                 return {"$and": [{"is_archived": True}, {"program_id": program_id}]}
@@ -354,30 +487,30 @@ DATABASE INFORMATION (only authoritative source):
 
         def _fetch_archived_context() -> str:
             results = self._query_collection(
-                retrieval_query, _archived_filter(), n_results=self.RETRIEVAL_TOP_K
+                query_for_chroma, _archived_filter(), n_results=self.RETRIEVAL_TOP_K
             )
-            raw = self._extract_context_from_results(results)
+            raw = self._extract_context_from_results(results, threshold)
             if raw and specific_year:
-                raw = self._prioritise_year_chunks(results, specific_year)
+                raw = self._prioritise_year_chunks(results, specific_year, threshold)
             return raw
 
         def _fetch_current_context() -> str:
             if program_id:
                 program_results = self._query_collection(
-                    retrieval_query,
+                    query_for_chroma,
                     {"$and": [{"is_archived": False}, {"program_id": program_id}]},
                     n_results=self.RETRIEVAL_TOP_K,
                 )
                 general_results = self._query_collection(
-                    retrieval_query,
+                    query_for_chroma,
                     {"is_archived": False},
                     n_results=self.RETRIEVAL_TOP_K,
                 )
-                return self._merge_contexts(program_results, general_results)
+                return self._merge_contexts(program_results, general_results, threshold)
             results = self._query_collection(
-                retrieval_query, {"is_archived": False}, n_results=self.RETRIEVAL_TOP_K
+                query_for_chroma, {"is_archived": False}, n_results=self.RETRIEVAL_TOP_K
             )
-            return self._extract_context_from_results(results)
+            return self._extract_context_from_results(results, threshold)
 
         has_archived_content = False
 
@@ -415,18 +548,21 @@ DATABASE INFORMATION (only authoritative source):
 
         return "\n\n".join(merged)
 
-    def _merge_contexts(self, primary_results: dict, secondary_results: dict) -> str:
+    def _merge_contexts(self, primary_results: dict, secondary_results: dict,
+                        threshold: Optional[float] = None) -> str:
         """Merge two retrieval result sets, de-duplicating and relevance-filtering both."""
         return self._merge_context_strings(
-            self._extract_context_from_results(primary_results),
-            self._extract_context_from_results(secondary_results),
+            self._extract_context_from_results(primary_results, threshold),
+            self._extract_context_from_results(secondary_results, threshold),
         )
 
-    def _prioritise_year_chunks(self, results: dict, target_year: int) -> str:
+    def _prioritise_year_chunks(self, results: dict, target_year: int,
+                                threshold: Optional[float] = None) -> str:
         """
         Re-order archived chunks so those whose revision_year metadata matches
         target_year appear first, then apply the normal relevance filter.
         """
+        effective_threshold = threshold if threshold is not None else self.RELEVANCE_THRESHOLD
         docs = results.get("documents", [[]])
         distances = results.get("distances", [[]])
         metadatas = results.get("metadatas", [[]])
@@ -443,7 +579,7 @@ DATABASE INFORMATION (only authoritative source):
                 continue
             if idx < len(dist_list):
                 similarity = 1.0 - dist_list[idx] / 2.0
-                if similarity < self.RELEVANCE_THRESHOLD:
+                if similarity < effective_threshold:
                     continue
             meta = meta_list[idx] if idx < len(meta_list) else {}
             if meta.get("revision_year") == target_year:
@@ -471,20 +607,13 @@ DATABASE INFORMATION (only authoritative source):
                 return message["content"]
         return None
 
-    def _generate_closing_response(self, prompt: str, history: List[dict]) -> str:
-        """
-        Use GPT-4o-mini to generate a professional and friendly closing response
-        that feels natural based on the conversation context.
-        """
-        system_prompt = (
-            "You are TLC ChatMate, the official virtual front desk of The Lewis College. "
-            "The student is wrapping up the conversation. "
-            "Respond with a warm, sincere, and professional farewell that feels natural given the conversation. "
-            "You may acknowledge what was discussed if appropriate, wish them well, and invite them to return anytime. "
-            "Do NOT use hollow or repetitive phrases. "
-            "Never start your response with 'I'. "
-            "Keep it brief — 2 to 3 sentences at most."
-        )
+    # -------------------------------------------------------------------------
+    # LLM Response Generators
+    # -------------------------------------------------------------------------
+
+    def _call_llm(self, system_prompt: str, history: List[dict],
+                  prompt: str, temperature: float, max_tokens: int) -> str:
+        """Shared helper to call the LLM and return the response text."""
         messages = [
             {"role": "system", "content": system_prompt},
             *history[-4:],
@@ -493,17 +622,55 @@ DATABASE INFORMATION (only authoritative source):
         response = self.openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
-            temperature=0.4,
-            max_tokens=150,
+            temperature=temperature,
+            max_tokens=max_tokens,
             top_p=0.9,
         )
         return response.choices[0].message.content.strip()
 
-    def _generate_confirmation_response(self, prompt: str, last_answer: str, history: List[dict]) -> str:
+    def _generate_closing_response(self, prompt: str, history: List[dict]) -> str:
+        """Generate a warm, language-aware closing response."""
+        lang = self._detect_language(prompt)
+        if lang == "tagalog":
+            lang_instruction = (
+                "The student is writing in Tagalog. Respond in Tagalog."
+            )
+        elif lang == "mixed":
+            lang_instruction = (
+                "The student is mixing English and Tagalog. Mirror their language naturally."
+            )
+        else:
+            lang_instruction = "Respond in English."
+
+        system_prompt = (
+            "You are TLC ChatMate, the official virtual front desk of The Lewis College. "
+            "The student is wrapping up the conversation. "
+            "Respond with a warm, sincere, and professional farewell that feels natural given the conversation. "
+            "You may acknowledge what was discussed if appropriate, wish them well, and invite them to return anytime. "
+            "Do NOT use hollow or repetitive phrases. "
+            "Never start your response with 'I'. "
+            f"Keep it brief — 2 to 3 sentences at most. {lang_instruction}"
+        )
+        return self._call_llm(system_prompt, history, prompt, temperature=0.4, max_tokens=150)
+
+    def _generate_confirmation_response(self, prompt: str, last_answer: str,
+                                        history: List[dict]) -> str:
         """
-        Use GPT-4o-mini to generate a professional and friendly confirmation
-        response that re-affirms the previous answer without static phrasing.
+        Generate a language-aware confirmation response that re-affirms the
+        previous answer without static phrasing.
         """
+        lang = self._detect_language(prompt)
+        if lang == "tagalog":
+            lang_instruction = (
+                "The student is writing in Tagalog. Respond in Tagalog."
+            )
+        elif lang == "mixed":
+            lang_instruction = (
+                "The student is mixing English and Tagalog. Mirror their language naturally."
+            )
+        else:
+            lang_instruction = "Respond in English."
+
         system_prompt = (
             "You are TLC ChatMate, the official virtual front desk of The Lewis College. "
             "The student is asking you to confirm or validate your previous answer. "
@@ -512,21 +679,9 @@ DATABASE INFORMATION (only authoritative source):
             "Do NOT introduce any new information. "
             "Do NOT use generic filler phrases like 'Absolutely!' or 'Of course!' alone — always include the substance. "
             "Never start your response with 'I'. "
-            "Keep the response concise — 2 to 3 sentences at most."
+            f"Keep the response concise — 2 to 3 sentences at most. {lang_instruction}"
         )
-        messages = [
-            {"role": "system", "content": system_prompt},
-            *history[-4:],
-            {"role": "user", "content": prompt},
-        ]
-        response = self.openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.3,
-            max_tokens=200,
-            top_p=0.9,
-        )
-        return response.choices[0].message.content.strip()
+        return self._call_llm(system_prompt, history, prompt, temperature=0.3, max_tokens=200)
 
     # -------------------------------------------------------------------------
     # Core Processing
@@ -554,18 +709,22 @@ DATABASE INFORMATION (only authoritative source):
                 success=True, response=closing_response, requires_auth=False, intent=intent
             )
 
-        # Guard: inform the student if the knowledge base is still loading.
         if not self._is_sync_ready():
-            sync_response = (
-                "TLC ChatMate is still loading the knowledge base. "
-                "Please wait a moment and try again."
-            )
+            lang = self._detect_language(prompt)
+            if lang == "tagalog":
+                sync_response = (
+                    "Nilo-load pa ng TLC ChatMate ang knowledge base. "
+                    "Mangyaring maghintay ng ilang sandali at subukan muli."
+                )
+            else:
+                sync_response = (
+                    "TLC ChatMate is still loading the knowledge base. "
+                    "Please wait a moment and try again."
+                )
             return PromptResponse(
                 success=True, response=sync_response, requires_auth=False, intent=intent
             )
 
-        # Handle confirmation queries by re-affirming the previous answer
-        # instead of treating them as new retrieval requests.
         if self._is_confirmation_query(prompt, history):
             last_answer = self._get_last_assistant_message(history)
             if last_answer:
@@ -581,14 +740,24 @@ DATABASE INFORMATION (only authoritative source):
 
         main_topic = self.extract_main_topic(prompt, history)
         retrieval_query = self.build_conversational_query(history, main_topic)
+        translated_query = self._translate_to_english(retrieval_query)
 
-        context, has_archived_content = self._retrieve_context(retrieval_query, prompt)
+        context, has_archived_content = self._retrieve_context(
+            retrieval_query, prompt, translated_query
+        )
 
         if not context:
-            ai_response = (
-                "I'm sorry, but I don't have information about that topic in our current records. "
-                "You may visit the registrar or contact our office directly for further assistance."
-            )
+            lang = self._detect_language(prompt)
+            if lang == "tagalog":
+                ai_response = (
+                    "Paumanhin, wala akong impormasyon tungkol sa paksang iyon sa aming mga rekord. "
+                    "Maaari kang pumunta sa registrar o makipag-ugnayan sa aming opisina para sa karagdagang tulong."
+                )
+            else:
+                ai_response = (
+                    "I'm sorry, but I don't have information about that topic in our current records. "
+                    "You may visit the registrar or contact our office directly for further assistance."
+                )
             self._update_conversation_history(
                 conversation_session, history, prompt, ai_response
             )
@@ -596,7 +765,9 @@ DATABASE INFORMATION (only authoritative source):
                 success=True, response=ai_response, requires_auth=False, intent=intent
             )
 
-        system_prompt = self._create_system_prompt(context, is_initial, has_archived_content)
+        system_prompt = self._create_system_prompt(
+            context, is_initial, prompt=prompt, has_archived_content=has_archived_content
+        )
         messages = self._prepare_messages(system_prompt, history, prompt)
 
         response = self.openai_client.chat.completions.create(
