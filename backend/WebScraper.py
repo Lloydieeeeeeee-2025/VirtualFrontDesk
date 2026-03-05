@@ -12,7 +12,7 @@ class WebScraper:
     _DISCARD_TAGS = ['script', 'style', 'nav', 'header', 'iframe', 'svg', 'form']
 
     def __init__(self):
-        self.timeout = 120
+        self.timeout = 30
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
