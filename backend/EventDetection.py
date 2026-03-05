@@ -10,7 +10,7 @@ class EventDetection:
 
     def get_current_document_ids(self) -> Set[str]:
         """Get all current (non-archived) document IDs from the database."""
-        current_ids = set()
+        current_ids: Set[str] = set()
         db = self.repo.get_db_connection()
         if not db:
             return current_ids
@@ -31,11 +31,7 @@ class EventDetection:
             conn.execute("SELECT link_url FROM url")
             for (url,) in conn.fetchall():
                 if url:
-                    url_id = (
-                        url.replace('https://', '').replace('http://', '')
-                           .replace('/', '_').replace('.', '_').rstrip('_')
-                    )
-                    current_ids.add(f"url_{url_id}")
+                    current_ids.add(self._format_doc_id("url", url))
 
             conn.execute("SELECT faq_id FROM faqs")
             for (faq_id,) in conn.fetchall():
@@ -56,11 +52,10 @@ class EventDetection:
         Get incremental changes since last sync.
         Returns: {'inserted': [...], 'updated': [...], 'deleted': [...]}
         """
-        changes = {'inserted': [], 'updated': [], 'deleted': []}
+        changes: Dict[str, List[str]] = {'inserted': [], 'updated': [], 'deleted': []}
 
         try:
             conn = db.cursor()
-
             conn.execute("""
                 SELECT 'handbook' AS type, handbook_id AS id FROM handbook
                 WHERE updated_at > %s AND archive_at IS NULL
@@ -102,14 +97,13 @@ class EventDetection:
         """
         Check if any records have been updated, inserted, or deleted since last sync.
 
-        False-positive guard:  last_processed_ids must be seeded before calling
+        False-positive guard: last_processed_ids must be seeded before calling
         this method (KnowledgeRepository does this after every sync and on the
-        first call to check_updates_available).  Without seeding, the deletion
+        first call to check_updates_available). Without seeding, the deletion
         check always reports every document as deleted on a fresh process start.
         """
         try:
             conn = db.cursor()
-
             conn.execute("""
                 SELECT COUNT(*) FROM (
                     SELECT handbook_id FROM handbook
@@ -130,17 +124,10 @@ class EventDetection:
             update_count = result[0] if result else 0
 
             if update_count > 0:
-                print(f"Updates detected: {update_count} records modified since {last_sync_time}")
                 return True
 
-            # Check for deletions using in-memory baseline.
-            current_doc_ids = self.get_current_document_ids()
-            deleted_ids = self.last_processed_ids - current_doc_ids
-            if deleted_ids:
-                print(f"Deletions detected: {len(deleted_ids)} documents removed")
-                return True
-
-            return False
+            deleted_ids = self.last_processed_ids - self.get_current_document_ids()
+            return bool(deleted_ids)
 
         except Exception as e:
             print(f"Error checking for updates: {e}")
@@ -150,7 +137,7 @@ class EventDetection:
     def _format_doc_id(doc_type: str, doc_id: str) -> str:
         """Format document ID based on type."""
         if doc_type == 'url':
-            url_id = (
+            url_id = ( 
                 doc_id.replace('https://', '').replace('http://', '')
                       .replace('/', '_').replace('.', '_').rstrip('_')
             )

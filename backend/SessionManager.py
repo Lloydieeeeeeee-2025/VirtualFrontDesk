@@ -13,7 +13,7 @@ class SessionManager:
     def __init__(self, max_history_per_session: int = 4):
         """
         Args:
-            max_history_per_session: Maximum conversation exchanges to keep per session
+            max_history_per_session: Maximum conversation exchanges to keep per session.
         """
         self._sessions: Dict[str, Dict] = {}
         self._lock = threading.RLock()
@@ -24,13 +24,13 @@ class SessionManager:
         """
         Create a new isolated session.
         Each session_id must be UNIQUE per device/browser.
-        
+
         Args:
-            session_id: Optional custom session ID, generates UUID if not provided
-            user_id: Optional user identifier for tracking
-            
+            session_id: Optional custom session ID; generates UUID if not provided.
+            user_id: Optional user identifier for tracking.
+
         Returns:
-            The session ID
+            The session ID.
         """
         if not session_id:
             session_id = f"session_{uuid.uuid4()}"
@@ -41,75 +41,89 @@ class SessionManager:
                 'user_id': user_id,
                 'created_at': datetime.now(),
                 'last_accessed': datetime.now(),
-                'metadata': {}
+                'metadata': {},
             }
             return session_id
 
     def get_session_history(self, session_id: str) -> List[dict]:
         """
         Get conversation history for a specific session.
-        Returns empty list if session doesn't exist.
-        
+
         Args:
-            session_id: The session ID
-            
+            session_id: The session ID.
+
         Returns:
-            List of message dicts with 'role' and 'content' keys
+            List of message dicts with 'role' and 'content' keys,
+            or an empty list if the session does not exist.
         """
         with self._lock:
             if session_id not in self._sessions:
                 return []
-
             self._sessions[session_id]['last_accessed'] = datetime.now()
             return self._sessions[session_id]['history'].copy()
 
     def add_to_history(self, session_id: str, role: str, content: str) -> bool:
         """
         Add a message to a session's history.
-        
+
         Args:
-            session_id: The session ID
-            role: 'user' or 'assistant'
-            content: Message content
-            
+            session_id: The session ID.
+            role: 'user' or 'assistant'.
+            content: Message content.
+
         Returns:
-            True if added successfully, False if session not found
+            True if added successfully, False if session not found.
         """
         with self._lock:
             if session_id not in self._sessions:
                 return False
 
-            self._sessions[session_id]['history'].append({
-                'role': role,
-                'content': content
-            })
+            self._sessions[session_id]['history'].append({'role': role, 'content': content})
             self._sessions[session_id]['last_accessed'] = datetime.now()
 
             if len(self._sessions[session_id]['history']) > self.max_messages:
-                self._sessions[session_id]['history'] = self._sessions[session_id]['history'][-self.max_messages:]
-
+                self._sessions[session_id]['history'] = (
+                    self._sessions[session_id]['history'][-self.max_messages:]
+                )
             return True
 
     def update_history(self, session_id: str, history: List[dict]) -> bool:
         """
-        Bulk update conversation history for a session.
-        This replaces the entire history.
-        
+        Bulk-replace conversation history for a session.
+
         Args:
-            session_id: The session ID
-            history: List of message dicts
-            
+            session_id: The session ID.
+            history: List of message dicts.
+
         Returns:
-            True if updated successfully, False if session not found
+            True if updated successfully, False if session not found.
         """
         with self._lock:
             if session_id not in self._sessions:
                 return False
-
-            trimmed_history = history[-self.max_messages:] if history else []
-            self._sessions[session_id]['history'] = trimmed_history
+            self._sessions[session_id]['history'] = (
+                history[-self.max_messages:] if history else []
+            )
             self._sessions[session_id]['last_accessed'] = datetime.now()
             return True
+
+    def clear_all_histories(self) -> int:
+        """
+        Clear conversation history for every active session without deleting
+        the sessions themselves. Called after a knowledge-base sync so that
+        stale answers in history can no longer be surfaced by the confirmation
+        or follow-up paths.
+
+        Returns:
+            Number of sessions whose history was cleared.
+        """
+        with self._lock:
+            count = 0
+            for session_data in self._sessions.values():
+                if session_data['history']:
+                    session_data['history'] = []
+                    count += 1
+            return count
 
     def session_exists(self, session_id: str) -> bool:
         """Check if a session exists."""
@@ -131,7 +145,7 @@ class SessionManager:
                 'user_id': session['user_id'],
                 'created_at': session['created_at'],
                 'last_accessed': session['last_accessed'],
-                'history_length': len(session['history'])
+                'history_length': len(session['history']),
             }
 
     def delete_session(self, session_id: str) -> bool:
@@ -144,24 +158,20 @@ class SessionManager:
 
     def clear_expired_sessions(self, timeout_seconds: int = 3600) -> int:
         """
-        Remove sessions older than timeout (default 1 hour).
-        
+        Remove sessions inactive for longer than timeout (default 1 hour).
+
         Args:
-            timeout_seconds: Session inactivity timeout
-            
+            timeout_seconds: Session inactivity timeout in seconds.
+
         Returns:
-            Number of sessions deleted
+            Number of sessions deleted.
         """
         with self._lock:
             now = datetime.now()
-            expired = []
-
-            for session_id, session_data in self._sessions.items():
-                elapsed = (now - session_data['last_accessed']).total_seconds()
-                if elapsed > timeout_seconds:
-                    expired.append(session_id)
-
+            expired = [
+                sid for sid, data in self._sessions.items()
+                if (now - data['last_accessed']).total_seconds() > timeout_seconds
+            ]
             for session_id in expired:
                 del self._sessions[session_id]
-
             return len(expired)

@@ -1,3 +1,4 @@
+import json
 import threading
 import uvicorn
 from fastapi import FastAPI, BackgroundTasks
@@ -93,7 +94,6 @@ class VirtualFrontDesk(ChromaDBService):
             "salamat", "maraming salamat", "sige", "sige na",
             "ayos na", "tapos na", "okay na", "ok na", "ok lang",
         }
-
         self.confirmation_phrases = {
             "is that correct", "is that right", "are you sure", "are you certain",
             "is that accurate", "is that true", "are you confident", "is that confirmed",
@@ -106,6 +106,17 @@ class VirtualFrontDesk(ChromaDBService):
         }
 
         self._empty_result = {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+
+        self._no_info_response = {
+            "english": (
+                "I'm sorry, but I don't have information about that topic in our current records. "
+                "You may visit the registrar or contact our office directly for further assistance."
+            ),
+            "tagalog": (
+                "Paumanhin, wala akong impormasyon tungkol sa paksang iyon sa aming mga rekord. "
+                "Maaari kang pumunta sa registrar o makipag-ugnayan sa aming opisina para sa karagdagang tulong."
+            ),
+        }
 
     # -------------------------------------------------------------------------
     # Language Detection
@@ -182,6 +193,10 @@ class VirtualFrontDesk(ChromaDBService):
         except Exception:
             return prompt
 
+    def _get_no_info_response(self, lang: str) -> str:
+        """Return the appropriate no-information response for the detected language."""
+        return self._no_info_response.get(lang, self._no_info_response["english"])
+
     # -------------------------------------------------------------------------
     # Sync Readiness
     # -------------------------------------------------------------------------
@@ -191,8 +206,7 @@ class VirtualFrontDesk(ChromaDBService):
         if self.knowledge_repo.progress.get("status") != "completed":
             return False
         try:
-            collection = self.get_collection()
-            return collection.count() > 1
+            return self.get_collection().count() > 1
         except Exception:
             return False
 
@@ -231,8 +245,7 @@ class VirtualFrontDesk(ChromaDBService):
         """Return True when the student is asking to validate a previous answer."""
         if not history:
             return False
-        has_prior_answer = any(m["role"] == "assistant" for m in history)
-        if not has_prior_answer:
+        if not any(m["role"] == "assistant" for m in history):
             return False
         normalised = prompt.lower().strip().rstrip("?!.")
         return normalised in self.confirmation_phrases
@@ -249,38 +262,46 @@ class VirtualFrontDesk(ChromaDBService):
         hour = datetime.now(self.ph_timezone).hour
         if 5 <= hour < 12:
             return "Good morning"
-        elif 12 <= hour < 18:
+        if 12 <= hour < 18:
             return "Good afternoon"
         return "Good evening"
 
-    def _get_last_assistant_message(self, history: List[dict]) -> Optional[str]:
-        """Return the most recent assistant message from history, or None."""
-        for message in reversed(history):
-            if message["role"] == "assistant":
-                return message["content"]
-        return None
-
     # -------------------------------------------------------------------------
-    # Query Rewriting (core fix for first-turn and follow-up failures)
+    # Query Rewriting
     # -------------------------------------------------------------------------
 
-    def rewrite_query_for_retrieval(self, prompt: str, history: List[dict]) -> str:
+    def rewrite_query_for_retrieval(
+        self, prompt: str, history: List[dict], archive_params: Optional[dict] = None
+    ) -> str:
         """
         Use an LLM to rewrite the student's prompt into a self-contained,
         semantically rich retrieval query in English.
 
-        This fixes:
-        - First-turn failures: enriches bare/vague queries with implicit context.
-        - Follow-up failures: resolves pronouns and ellipsis using history.
-        - Entity blindness: expands partial names/titles so embeddings match
-          the way entities appear in stored documents
-          (e.g. "the registrar" → "registrar name contact information TLC").
-
-        History is summarised (last 3 user turns + last assistant turn) and
-        injected as context so the rewriter can resolve references without
-        being given the full conversation.
+        When archive_params indicates the student is asking about an older or
+        archived version of a document, an explicit instruction is injected so
+        the rewriter preserves — and enriches — the historical/archival intent.
+        This ensures the ChromaDB semantic query matches archived chunk content
+        even after pronoun resolution and entity expansion.
         """
         history_summary = self._summarise_history_for_rewriter(history)
+
+        archive_instruction = ""
+        if archive_params and archive_params.get("include_archived"):
+            specific_year = archive_params.get("specific_year")
+            if specific_year:
+                archive_instruction = (
+                    f"\n10. ARCHIVE QUERY — the student is asking about a SPECIFIC OLDER VERSION "
+                    f"from {specific_year}. The rewritten query MUST include the year {specific_year} "
+                    f"and terms like 'archived', 'old version', or 'previous version' so it matches "
+                    f"archived document chunks in the vector database."
+                )
+            else:
+                archive_instruction = (
+                    "\n10. ARCHIVE QUERY — the student is asking about an OLDER or PREVIOUS version "
+                    "of a document. The rewritten query MUST preserve historical intent by including "
+                    "terms like 'archived', 'old version', 'previous version', or 'superseded' so it "
+                    "matches archived document chunks in the vector database."
+                )
 
         system_content = (
             "You are a search-query rewriter for a Philippine college knowledge-base chatbot. "
@@ -299,11 +320,16 @@ class VirtualFrontDesk(ChromaDBService):
             "   - 'course' or 'courses' → 'program' or 'programs' "
             "(in the Philippines, 'course' means a degree program, e.g. BSIT, BSBA)\n"
             "   Apply this mapping silently — do not explain it in the output.\n"
-            "6. If the question is already clear and complete, return it with minor enrichment only.\n"
-            "7. Always write the output in English regardless of the student's input language.\n"
-            "8. Keep the rewritten query concise — no more than 30 words."
+            "6. PROGRAM NAME — always include the full, specific program name when the student "
+            "mentions or implies a program (e.g. 'ACT AppDev' → 'ACT Applications Development', "
+            "'networking' → 'ACT Networking', 'data engineering' → 'ACT Data Engineering', "
+            "'BSIT' → 'Bachelor of Science in Information Technology BSIT'). "
+            "This is critical because multiple programs share identical subject names.\n"
+            "7. If the question is already clear and complete, return it with minor enrichment only.\n"
+            "8. Always write the output in English regardless of the student's input language.\n"
+            "9. Keep the rewritten query concise — no more than 30 words."
+            f"{archive_instruction}"
         )
-
         user_content = (
             f"CONVERSATION HISTORY (most recent):\n{history_summary}\n\n"
             f"STUDENT'S CURRENT QUESTION: {prompt}\n\n"
@@ -348,16 +374,6 @@ class VirtualFrontDesk(ChromaDBService):
             lines.append(f"Assistant: {truncated}")
 
         return "\n".join(lines) if lines else "(no prior conversation)"
-
-    # kept for backward-compat but no longer used in the main flow
-    def build_conversational_query(self, history: List[dict], current_prompt: str) -> str:
-        """Fallback string-based query builder (superseded by rewrite_query_for_retrieval)."""
-        recent_user_messages = [
-            m["content"] for m in history[-4:] if m["role"] == "user"
-        ]
-        if not recent_user_messages:
-            return current_prompt
-        return f"{current_prompt} Previous question: {recent_user_messages[-1]}"
 
     def extract_main_topic(self, prompt: str, history: List[dict]) -> str:
         """Expand prompt with previous question context if this is a follow-up."""
@@ -427,6 +443,17 @@ STRICT RESPONSE RULES — MUST FOLLOW:
       (e.g. BSIT, BSBA, BEED). Match this against program records.
     - Always interpret the student's words using this mapping and respond using
       the same terminology the student used — do NOT correct or lecture them about it.
+15. SUBJECT LIST VERIFICATION — when the student asks for subjects in a specific year and semester:
+    a. First locate the exact YEAR label (e.g. "FIRST YEAR", "SECOND YEAR") AND the exact
+       SEMESTER label (e.g. "FIRST SEMESTER", "SECOND SEMESTER") inside the DATABASE INFORMATION.
+    b. List ONLY the subjects that appear under BOTH the matching year AND the matching semester.
+       Do NOT list subjects from a different year or a different semester even if they are nearby.
+    c. If the requested year or semester label does not exist anywhere in the DATABASE INFORMATION,
+       respond: "I'm sorry, but [program name] does not have a [year] [semester] in its curriculum.
+       Please check the year and semester and try again."
+       (Translate to match the student's language when applicable.)
+    d. Never infer or guess which year/semester a subject belongs to.
+       Only list subjects that are explicitly listed under that year and semester label.
 {archived_note}
 CONVERSATION FLOW:
 - Greeting (only at the start or when appropriate)
@@ -440,12 +467,6 @@ DATABASE INFORMATION (only authoritative source):
 ----------
 """
 
-    def _prepare_messages(self, system_prompt: str, history: List[dict], prompt: str) -> List[dict]:
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(history[-4:])
-        messages.append({"role": "user", "content": prompt})
-        return messages
-
     # -------------------------------------------------------------------------
     # ChromaDB Retrieval
     # -------------------------------------------------------------------------
@@ -454,17 +475,18 @@ DATABASE INFORMATION (only authoritative source):
                           n_results: int = RETRIEVAL_TOP_K) -> dict:
         """
         Query ChromaDB and return results with distance scores.
-        Retries with a force-refreshed client and then with the broadest filter
-        when an initial filtered query returns nothing.
+        Retries with a force-refreshed client when an initial query returns
+        nothing, then falls back to the broadest non-archived filter.
         """
+        broad_filter = {"is_archived": False}
+
         def _run_query(collection, where: dict) -> dict:
             count = collection.count()
             if count == 0:
                 return self._empty_result
-            safe_n = min(n_results, count)
             return collection.query(
                 query_texts=[query],
-                n_results=safe_n,
+                n_results=min(n_results, count),
                 where=where,
                 include=["documents", "metadatas", "distances"],
             )
@@ -472,8 +494,6 @@ DATABASE INFORMATION (only authoritative source):
         def _has_results(result: dict) -> bool:
             docs = result.get("documents", [[]])
             return bool(docs and docs[0])
-
-        broad_filter = {"is_archived": False}
 
         try:
             collection = self.get_collection()
@@ -491,10 +511,9 @@ DATABASE INFORMATION (only authoritative source):
         except Exception:
             try:
                 collection = self.get_collection(force_refresh=True)
-                safe_n = min(n_results, collection.count())
                 return collection.query(
                     query_texts=[query],
-                    n_results=safe_n,
+                    n_results=min(n_results, collection.count()),
                     where=broad_filter,
                     include=["documents", "metadatas", "distances"],
                 )
@@ -509,11 +528,8 @@ DATABASE INFORMATION (only authoritative source):
         ChromaDB returns cosine distance in [0, 2]; similarity = 1 - distance/2.
         """
         effective_threshold = threshold if threshold is not None else self.RELEVANCE_THRESHOLD
-        docs = results.get("documents", [[]])
-        distances = results.get("distances", [[]])
-
-        doc_list = docs[0] if docs and isinstance(docs[0], list) else []
-        dist_list = distances[0] if distances and isinstance(distances[0], list) else []
+        doc_list = (results.get("documents", [[]])[0] or [])
+        dist_list = (results.get("distances", [[]])[0] or [])
 
         context_parts = []
         for idx, doc in enumerate(doc_list):
@@ -527,6 +543,53 @@ DATABASE INFORMATION (only authoritative source):
 
         return "\n\n".join(context_parts)
 
+    def _rerank_chunks(self, query: str, chunks: List[str], top_n: int = 5) -> List[str]:
+        """
+        Use the LLM to rerank retrieved chunks by relevance to the query.
+        Falls back to the original order when the LLM call fails or returns
+        unparseable output.
+        """
+        if not chunks:
+            return chunks
+
+        numbered = "\n\n".join(f"[{i + 1}] {chunk}" for i, chunk in enumerate(chunks))
+        system_content = (
+            "You are a relevance ranker for a college knowledge-base chatbot. "
+            "Given a student query and a list of numbered text chunks, "
+            "output ONLY a JSON array of integers representing the chunk numbers "
+            "in descending order of relevance to the query. "
+            "Include only chunks that are actually relevant. "
+            "Output format example: [3, 1, 5, 2]"
+        )
+        user_content = (
+            f"STUDENT QUERY: {query}\n\n"
+            f"CHUNKS:\n{numbered}\n\n"
+            f"Return the top {top_n} most relevant chunk numbers as a JSON array."
+        )
+
+        try:
+            response = self.openai_client.chat.completions.create(
+                model=self.llm_model,
+                messages=[
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=0.0,
+                max_tokens=100,
+            )
+            raw = response.choices[0].message.content.strip().strip("` \n").lstrip("json").strip()
+            ranked_indices = json.loads(raw)
+            seen: set = set()
+            reranked = []
+            for idx in ranked_indices:
+                i = int(idx) - 1
+                if 0 <= i < len(chunks) and i not in seen:
+                    seen.add(i)
+                    reranked.append(chunks[i])
+            return reranked if reranked else chunks[:top_n]
+        except Exception:
+            return chunks[:top_n]
+
     def _merge_context_strings(self, primary: str, secondary: str) -> str:
         """Merge two context strings, de-duplicating by chunk content."""
         seen: set = set()
@@ -538,14 +601,6 @@ DATABASE INFORMATION (only authoritative source):
                 merged.append(chunk)
         return "\n\n".join(merged)
 
-    def _merge_contexts(self, primary_results: dict, secondary_results: dict,
-                        threshold: Optional[float] = None) -> str:
-        """Merge two retrieval result sets, de-duplicating and relevance-filtering both."""
-        return self._merge_context_strings(
-            self._extract_context_from_results(primary_results, threshold),
-            self._extract_context_from_results(secondary_results, threshold),
-        )
-
     def _prioritise_year_chunks(self, results: dict, target_year: int,
                                 threshold: Optional[float] = None) -> str:
         """
@@ -553,13 +608,9 @@ DATABASE INFORMATION (only authoritative source):
         target_year appear first, then apply the normal relevance filter.
         """
         effective_threshold = threshold if threshold is not None else self.RELEVANCE_THRESHOLD
-        docs = results.get("documents", [[]])
-        distances = results.get("distances", [[]])
-        metadatas = results.get("metadatas", [[]])
-
-        doc_list = docs[0] if docs and isinstance(docs[0], list) else []
-        dist_list = distances[0] if distances and isinstance(distances[0], list) else []
-        meta_list = metadatas[0] if metadatas and isinstance(metadatas[0], list) else []
+        doc_list = (results.get("documents", [[]])[0] or [])
+        dist_list = (results.get("distances", [[]])[0] or [])
+        meta_list = (results.get("metadatas", [[]])[0] or [])
 
         prioritised: List[str] = []
         rest: List[str] = []
@@ -585,11 +636,21 @@ DATABASE INFORMATION (only authoritative source):
         Retrieve context from ChromaDB with archive-awareness.
 
         retrieval_query  – LLM-rewritten query built from history + topic.
-        prompt           – original student prompt (archive params / program detection).
+        prompt           – original student prompt (archive params / language).
         translated_query – English translation of retrieval_query for Tagalog/mixed input.
+
+        Program detection checks both the original prompt and the rewritten
+        retrieval_query so that queries where the program name is only resolved
+        during rewriting still get the correct filter.
+
+        When a program_id is detected, only chunks tagged with that program_id
+        are retrieved — no merging with the general pool.
         """
         archive_params = self.version_detector.should_include_archived(prompt)
-        program_id = self._extract_program_from_query(prompt)
+        program_id = (
+            self._extract_program_from_query(prompt)
+            or self._extract_program_from_query(retrieval_query)
+        )
 
         include_archived = archive_params.get("include_archived", False)
         archived_only = archive_params.get("archived_only", False)
@@ -617,17 +678,13 @@ DATABASE INFORMATION (only authoritative source):
 
         def _fetch_current_context() -> str:
             if program_id:
-                program_results = self._query_collection(
+                results = self._query_collection(
                     query_for_chroma,
                     {"$and": [{"is_archived": False}, {"program_id": program_id}]},
                     n_results=self.RETRIEVAL_TOP_K,
                 )
-                general_results = self._query_collection(
-                    query_for_chroma,
-                    {"is_archived": False},
-                    n_results=self.RETRIEVAL_TOP_K,
-                )
-                return self._merge_contexts(program_results, general_results, threshold)
+                return self._extract_context_from_results(results, threshold)
+
             results = self._query_collection(
                 query_for_chroma, {"is_archived": False}, n_results=self.RETRIEVAL_TOP_K
             )
@@ -651,6 +708,11 @@ DATABASE INFORMATION (only authoritative source):
                 has_archived_content = True
             else:
                 context = current_context
+
+        if context:
+            raw_chunks = [c for c in context.split("\n\n") if c.strip()]
+            reranked_chunks = self._rerank_chunks(retrieval_query, raw_chunks, top_n=5)
+            context = "\n\n".join(reranked_chunks)
 
         return context, has_archived_content
 
@@ -701,20 +763,38 @@ DATABASE INFORMATION (only authoritative source):
         )
         return self._call_llm(system_prompt, history, prompt, temperature=0.4, max_tokens=150)
 
-    def _generate_confirmation_response(self, prompt: str, last_answer: str,
+    def _generate_confirmation_response(self, prompt: str, context: str,
                                         history: List[dict]) -> str:
-        """Generate a language-aware confirmation response that re-affirms the previous answer."""
+        """
+        Generate a language-aware confirmation response grounded in live database
+        context. If the context is empty (the document was deleted since the last
+        response), the VFD honestly admits it no longer has that information instead
+        of blindly re-affirming stale history.
+        """
         lang = self._detect_language(prompt)
         lang_instruction = self._build_lang_instruction(lang)
+
+        if not context:
+            if lang == "tagalog":
+                return (
+                    "Paumanhin, ang impormasyong iyon ay wala na sa aming mga kasalukuyang rekord. "
+                    "Maaari kang pumunta sa registrar o makipag-ugnayan sa aming opisina para sa karagdagang tulong."
+                )
+            return (
+                "Apologies, but that information is no longer available in our current records. "
+                "You may visit the registrar or contact our office directly for further assistance."
+            )
+
         system_prompt = (
             "You are TLC ChatMate, the official virtual front desk of The Lewis College. "
             "The student is asking you to confirm or validate your previous answer. "
-            "Your job is to confidently re-affirm that your previous response was accurate, "
-            "then briefly restate the key point(s) in a natural, friendly, and professional tone. "
+            "Your job is to confidently re-affirm that your previous response was accurate "
+            "using ONLY the DATABASE INFORMATION provided below. "
             "Do NOT introduce any new information. "
             "Do NOT use generic filler phrases like 'Absolutely!' or 'Of course!' alone — always include the substance. "
             "Never start your response with 'I'. "
-            f"Keep the response concise — 2 to 3 sentences at most. {lang_instruction}"
+            f"Keep the response concise — 2 to 3 sentences at most. {lang_instruction}\n\n"
+            f"DATABASE INFORMATION:\n----------\n{context}\n----------"
         )
         return self._call_llm(system_prompt, history, prompt, temperature=0.3, max_tokens=200)
 
@@ -746,36 +826,40 @@ DATABASE INFORMATION (only authoritative source):
 
         if not self._is_sync_ready():
             lang = self._detect_language(prompt)
-            if lang == "tagalog":
-                sync_response = (
-                    "Nilo-load pa ng TLC ChatMate ang knowledge base. "
-                    "Mangyaring maghintay ng ilang sandali at subukan muli."
-                )
-            else:
-                sync_response = (
+            sync_response = (
+                "Nilo-load pa ng TLC ChatMate ang knowledge base. "
+                "Mangyaring maghintay ng ilang sandali at subukan muli."
+                if lang == "tagalog"
+                else (
                     "TLC ChatMate is still loading the knowledge base. "
                     "Please wait a moment and try again."
                 )
+            )
             return PromptResponse(
                 success=True, response=sync_response, requires_auth=False, intent=intent
             )
 
-        if self._is_confirmation_query(prompt, history):
-            last_answer = self._get_last_assistant_message(history)
-            if last_answer:
-                confirmation_response = self._generate_confirmation_response(
-                    prompt, last_answer, history
-                )
-                self._update_conversation_history(
-                    conversation_session, history, prompt, confirmation_response
-                )
-                return PromptResponse(
-                    success=True, response=confirmation_response, requires_auth=False, intent=intent
-                )
+        # Resolve archive intent before rewriting so the rewriter can preserve it.
+        archive_params = self.version_detector.should_include_archived(prompt)
 
-        # LLM-rewritten retrieval query — resolves pronouns, ellipsis, and entity references
-        retrieval_query = self.rewrite_query_for_retrieval(prompt, history)
+        # LLM-rewritten retrieval query — resolves pronouns, ellipsis, entity
+        # references, and preserves archival intent when required.
+        retrieval_query = self.rewrite_query_for_retrieval(prompt, history, archive_params)
         translated_query = self._translate_to_english(retrieval_query)
+
+        # Confirmation queries re-validate against the live database context so
+        # that deleted documents no longer produce stale re-affirmations.
+        if self._is_confirmation_query(prompt, history):
+            context, _ = self._retrieve_context(retrieval_query, prompt, translated_query)
+            confirmation_response = self._generate_confirmation_response(
+                prompt, context, history
+            )
+            self._update_conversation_history(
+                conversation_session, history, prompt, confirmation_response
+            )
+            return PromptResponse(
+                success=True, response=confirmation_response, requires_auth=False, intent=intent
+            )
 
         context, has_archived_content = self._retrieve_context(
             retrieval_query, prompt, translated_query
@@ -783,16 +867,7 @@ DATABASE INFORMATION (only authoritative source):
 
         if not context:
             lang = self._detect_language(prompt)
-            if lang == "tagalog":
-                ai_response = (
-                    "Paumanhin, wala akong impormasyon tungkol sa paksang iyon sa aming mga rekord. "
-                    "Maaari kang pumunta sa registrar o makipag-ugnayan sa aming opisina para sa karagdagang tulong."
-                )
-            else:
-                ai_response = (
-                    "I'm sorry, but I don't have information about that topic in our current records. "
-                    "You may visit the registrar or contact our office directly for further assistance."
-                )
+            ai_response = self._get_no_info_response(lang)
             self._update_conversation_history(
                 conversation_session, history, prompt, ai_response
             )
@@ -803,7 +878,11 @@ DATABASE INFORMATION (only authoritative source):
         system_prompt = self._create_system_prompt(
             context, is_initial, prompt=prompt, has_archived_content=has_archived_content
         )
-        messages = self._prepare_messages(system_prompt, history, prompt)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            *history[-4:],
+            {"role": "user", "content": prompt},
+        ]
 
         response = self.openai_client.chat.completions.create(
             model=self.llm_model,
@@ -833,9 +912,15 @@ knowledge_repo = KnowledgeRepository()
 vfd = VirtualFrontDesk(knowledge_repo)
 
 
+def _run_sync():
+    """Run a full sync and clear all session histories afterwards."""
+    knowledge_repo.sync_data_to_chromadb()
+    vfd.session_manager.clear_all_histories()
+
+
 @app.on_event("startup")
 async def startup_event():
-    threading.Thread(target=knowledge_repo.sync_data_to_chromadb, daemon=True).start()
+    threading.Thread(target=_run_sync, daemon=True).start()
 
 
 @app.post("/VirtualFrontDesk", response_model=PromptResponse)
@@ -878,7 +963,7 @@ async def get_sync_status():
 async def trigger_sync(background_tasks: BackgroundTasks):
     if knowledge_repo.progress["status"] == "running":
         return {"success": False, "message": "Sync already in progress"}
-    background_tasks.add_task(knowledge_repo.sync_data_to_chromadb)
+    background_tasks.add_task(_run_sync)
     return {"success": True, "message": "Sync started"}
 
 
